@@ -1,0 +1,88 @@
+{
+  "label": "4B-PQ2_0-fork",
+  "backend": "llama",
+  "base_url": "http://127.0.0.1:8090/v1",
+  "model": "/Users/hg/hackathon/Bonsai-demo/models/bonsai2-gguf/4B/Ternary-Bonsai-2-4B-PQ2_0.gguf",
+  "timestamp": "2026-11-14T12:36:36",
+  "chat": {
+    "ok": true,
+    "reply": "A ternary-weight language model assigns three possible output probabilities (rather than two) to each word prediction, allowing for more nuanced semantic choices such as distinguishing between \"is\" and \"was\" or providing greater uncertainty quantification.",
+    "seconds": 1.312,
+    "usage": {
+      "completion_tokens": 46,
+      "prompt_tokens": 25,
+      "total_tokens": 71,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    }
+  },
+  "json": {
+    "ok": true,
+    "mode": "json_schema",
+    "constrained": true,
+    "seconds": 2.381,
+    "raw": "{\n  \"name\": \"Maria Chen\",\n  \"city\": \"Ithaca\",\n  \"phone\": \"607-555-0142\",\n  \"topic\": \"robotics demo\",\n  \"day\": \"Saturday\",\n  \"attendees\": 4\n}",
+    "schema_errors": [],
+    "content_errors": []
+  },
+  "speed": {
+    "ok": true,
+    "warmup": {
+      "ttft_s": 0.2485,
+      "total_s": 5.111,
+      "completion_tokens": 199,
+      "client_decode_tps": 40.72,
+      "server_decode_tps": 40.5,
+      "server_prompt_tps": 134.8
+    },
+    "runs": [
+      {
+        "ttft_s": 0.2157,
+        "total_s": 5.4734,
+        "completion_tokens": 199,
+        "client_decode_tps": 37.66,
+        "server_decode_tps": 37.44,
+        "server_prompt_tps": 138.41
+      },
+      {
+        "ttft_s": 0.2147,
+        "total_s": 5.7836,
+        "completion_tokens": 199,
+        "client_decode_tps": 35.55,
+        "server_decode_tps": 35.39,
+        "server_prompt_tps": 127.5
+      },
+      {
+        "ttft_s": 0.2049,
+        "total_s": 5.3421,
+        "completion_tokens": 199,
+        "client_decode_tps": 38.54,
+        "server_decode_tps": 38.31,
+        "server_prompt_tps": 133.43
+      },
+      {
+        "ttft_s": 0.2001,
+        "total_s": 5.5136,
+        "completion_tokens": 199,
+        "client_decode_tps": 37.26,
+        "server_decode_tps": 37.04,
+        "server_prompt_tps": 136.53
+      },
+      {
+        "ttft_s": 0.2259,
+        "total_s": 5.7826,
+        "completion_tokens": 199,
+        "client_decode_tps": 35.63,
+        "server_decode_tps": 35.42,
+        "server_prompt_tps": 121.04
+      }
+    ],
+    "summary": {
+      "ttft_ms_median": 215.0,
+      "client_decode_tps_median": 37.26,
+      "server_decode_tps_median": 37.04,
+      "server_prompt_tps_median": 133.43
+    }
+  }
+}

@@ -168,16 +168,18 @@ Run the actions of a burst in order. After any action with `changed=false` when 
 | Language and tooling | Python 3.11+, `uv` with a lockfile, minimal deps (`rapidfuzz`, `websockets` or `fastapi`/`uvicorn`, `pyyaml`). Stdlib HTTP client is fine |
 | Portability | `brain/` and `eval/` run unchanged on Windows, Linux and macOS |
 
-## 7. Measured facts (Henrik's Mac: M3, 16 GB, macOS 26.5)
+## 7. Measured facts (Henrik's Mac: M3, 16 GB, macOS 26.5, plugged in, Low Power Mode off)
 
 | What | Number | Notes |
 |---|---|---|
-| Bonsai 2 4B time to first token | 270–355 ms | ~30-token prompt *(LPM)* |
-| Bonsai 2 4B decode | 14–16 tok/s | *(LPM)*; re-measure plugged in |
-| Bonsai 2 4B prompt processing | ~100–150 tok/s | **the bottleneck**: 300 dynamic tokens ≈ 2–3 s *(LPM)* → keep suffix small, cache the prefix |
+| Bonsai 2 **4B** time to first token | 172–215 ms | ~30-token prompt; fork PQ2_0 / upstream Q2_0 / MLX all similar |
+| Bonsai 2 **4B** decode | ~36–41 tok/s | llama-bench tg128 41; server streaming 36–37 |
+| Bonsai 2 **4B** prompt processing | ~320–330 tok/s | llama-bench pp512. 150 dynamic tokens ≈ 0.45 s → planner call ≈ **1.2 s** (150 in / 25 out) |
+| Bonsai 2 **2B** (fork PQ2_0) | TTFT 84 ms · decode 86 tok/s · prompt 863 tok/s | planner call ≈ **0.5 s**. A one-line switch if 4B is too slow; check quality on the eval |
+| Battery + Low Power Mode | everything ~2.5–3× slower | demo plugged in, Low Power Mode = Never |
 | JSON-schema output | works on llama-server (grammar) and mlx-vlm (llguidance) | 6/6 fields correct in our test |
 | Factual reliability at 4B, thinking off | wrong on 2 of 3 simple definition questions | use it to choose and format, not for facts |
-| Argmax STT server (`base.en`) | **147 ms** for a 6.1 s clip, SSE first event 46 ms | OpenAI `/v1/audio/transcriptions` on :50060 |
+| Argmax STT server | large-v3 turbo 626 MB: **~1.1 s** for a 9 s real-mic clip, accurate. `base.en` is fast but returned **empty text on real mic speech** (it only worked on synthetic voices) | OpenAI `/v1/audio/transcriptions` on :50060. Henrik is picking the final STT model; budget ~0.3–1.1 s for STT in the end-to-end latency |
 | SpeakerKit voiceprint | 256-d per speaker per run; ~0.3 s per 8–14 s clip | mean-centered cosine: same voice ≥ 0.54, different ≤ 0.09 (synthetic voices; real-voice test pending) |
 | Bonsai 4B server memory | ~1.3 GB | fine alongside STT on 16 GB |
 

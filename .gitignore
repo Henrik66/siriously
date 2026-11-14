@@ -23,3 +23,11 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Secrets (never commit)
+.env
+*.env
+
+# Personal voice data (real mic recordings, voiceprints): never publish
+smoke/clips/real/
+smoke/results/voice_session_*.json
