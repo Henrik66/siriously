@@ -231,6 +231,9 @@ final class Segmenter {
     let silenceFrames: Int
     var onUtterance: (([Float], Date) -> Void)?
     var onStart: (() -> Void)?
+    /// Called every `partialEvery` frames while someone is talking, with the speech so far (live transcript).
+    var onPartial: (([Float]) -> Void)?
+    var partialEvery = 10                                            // 10 x 50 ms = 0.5 s
     private var pending: [Float] = []
     private var preroll: [[Float]] = []
     private var history: [Float] = []
@@ -273,6 +276,8 @@ final class Segmenter {
         } else {
             speech.append(contentsOf: f)
             if db > floorDb + 6 { voiced += 1; silentRun = 0 } else { silentRun += 1 }
+            let frames = speech.count / frame
+            if frames % partialEvery == 0, voiced >= 8, silentRun < 6 { onPartial?(speech) }
             if silentRun >= silenceFrames || speech.count >= 12 * sampleRate {
                 let end = Date().addingTimeInterval(-Double(silentRun) * 0.05)
                 let keepTail = max(0, silentRun - 4) * frame             // keep 200 ms of trailing silence
@@ -401,7 +406,38 @@ func glob(_ dir: String, prefix: String) -> [String] {
 
 // MARK: - overlay events (UDP, fire-and-forget; PRD §4.6 event shape)
 
-final class OverlayEvents {
+/// Words on the overlay while you are still talking: every 0.5 s the speech so far is transcribed (small.en,
+/// ~150-300 ms) and sent as a "partial" event. One transcription at a time; a partial that finishes after
+/// its utterance ended is dropped. The overlay decides whether to show it (wake word / follow-up window).
+final class LiveTranscript: @unchecked Sendable {
+    private let ear: Ear
+    private let overlay: OverlayEvents
+    private let lock = NSLock()
+    private var busy = false
+    private var gen = 0
+
+    init(ear: Ear, overlay: OverlayEvents) { self.ear = ear; self.overlay = overlay }
+
+    func newUtterance() { lock.lock(); gen += 1; lock.unlock() }
+
+    func update(_ audio: [Float]) {
+        lock.lock()
+        if busy { lock.unlock(); return }
+        busy = true
+        let g = gen
+        lock.unlock()
+        Task {
+            let text = (try? await ear.transcribe(audio)) ?? ""
+            lock.lock()
+            busy = false
+            let current = g == gen
+            lock.unlock()
+            if current, !text.isEmpty { overlay.send("partial", data: ["text": text]) }
+        }
+    }
+}
+
+final class OverlayEvents: @unchecked Sendable {
     private let fd = socket(AF_INET, SOCK_DGRAM, 0)
     private var addr = sockaddr_in()
 
@@ -577,7 +613,9 @@ func runDaemon(_ ear: Ear) async throws {
     let mic = Mic(seg: seg)
     let (stream, cont) = AsyncStream<([Float], Date)>.makeStream()
     let overlay = OverlayEvents()
-    seg.onStart = { log("… speech"); overlay.send("listening") }
+    let live = LiveTranscript(ear: ear, overlay: overlay)
+    seg.onStart = { log("… speech"); live.newUtterance(); overlay.send("listening") }
+    seg.onPartial = { audio in live.update(audio) }
     seg.onUtterance = { clip, end in cont.yield((clip, end)) }
     try mic.start(name: opt.mic)
     mic.reportLevel(after: 3)
@@ -587,6 +625,7 @@ func runDaemon(_ ear: Ear) async throws {
     let runTag: String = { let f = DateFormatter(); f.dateFormat = "HHmmss"; return f.string(from: Date()) }()
     for await (clip, end) in stream {
         n += 1
+        live.newUtterance()                                     // late partials of this clip are dropped
         let id = String(format: "u-%@-%04d", runTag, n)          // unique across restarts (saved audio)
         let t0 = Date()
         async let textTask: String = ear.transcribe(clip)
