@@ -1,0 +1,88 @@
+{
+  "label": "4B-PQ2_0-fork",
+  "backend": "llama",
+  "base_url": "http://127.0.0.1:8080/v1",
+  "model": "/Users/hg/hackathon/Bonsai-demo/models/bonsai2-gguf/4B/Ternary-Bonsai-2-4B-PQ2_0.gguf",
+  "timestamp": "2026-11-14T11:42:25",
+  "chat": {
+    "ok": true,
+    "reply": "A ternary-weight language model is an artificial intelligence system that uses three distinct numerical values instead of the standard binary (0 and 1) to represent information, allowing for richer representations such as positive, negative, and neutral sentiment or probabilities.",
+    "seconds": 3.149,
+    "usage": {
+      "completion_tokens": 49,
+      "prompt_tokens": 25,
+      "total_tokens": 74,
+      "prompt_tokens_details": {
+        "cached_tokens": 21
+      }
+    }
+  },
+  "json": {
+    "ok": true,
+    "mode": "json_schema",
+    "constrained": true,
+    "seconds": 4.434,
+    "raw": "{\n  \"name\": \"Maria Chen\",\n  \"city\": \"Ithaca\",\n  \"phone\": \"607-555-0142\",\n  \"topic\": \"robotics demo\",\n  \"day\": \"Saturday\",\n  \"attendees\": 4\n}",
+    "schema_errors": [],
+    "content_errors": []
+  },
+  "speed": {
+    "ok": true,
+    "warmup": {
+      "ttft_s": 0.4054,
+      "total_s": 13.1517,
+      "completion_tokens": 199,
+      "client_decode_tps": 15.53,
+      "server_decode_tps": 15.46,
+      "server_prompt_tps": 79.5
+    },
+    "runs": [
+      {
+        "ttft_s": 0.361,
+        "total_s": 12.9808,
+        "completion_tokens": 199,
+        "client_decode_tps": 15.69,
+        "server_decode_tps": 15.61,
+        "server_prompt_tps": 79.61
+      },
+      {
+        "ttft_s": 0.3505,
+        "total_s": 12.9161,
+        "completion_tokens": 199,
+        "client_decode_tps": 15.76,
+        "server_decode_tps": 15.68,
+        "server_prompt_tps": 77.79
+      },
+      {
+        "ttft_s": 0.3551,
+        "total_s": 13.0552,
+        "completion_tokens": 199,
+        "client_decode_tps": 15.59,
+        "server_decode_tps": 15.51,
+        "server_prompt_tps": 76.7
+      },
+      {
+        "ttft_s": 0.362,
+        "total_s": 13.3458,
+        "completion_tokens": 199,
+        "client_decode_tps": 15.25,
+        "server_decode_tps": 15.18,
+        "server_prompt_tps": 75.17
+      },
+      {
+        "ttft_s": 0.344,
+        "total_s": 13.0341,
+        "completion_tokens": 199,
+        "client_decode_tps": 15.6,
+        "server_decode_tps": 15.53,
+        "server_prompt_tps": 79.19
+      }
+    ],
+    "summary": {
+      "ttft_ms_median": 355.0,
+      "client_decode_tps_median": 15.6,
+      "server_decode_tps_median": 15.53,
+      "server_prompt_tps_median": 77.79
+    }
+  }
+}

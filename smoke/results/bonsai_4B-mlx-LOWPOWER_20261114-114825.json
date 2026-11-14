@@ -1,0 +1,72 @@
+{
+  "label": "4B-mlx-LOWPOWER",
+  "backend": "mlx",
+  "base_url": "http://127.0.0.1:8081/v1",
+  "model": "/Users/hg/hackathon/Bonsai-demo/models/Ternary-Bonsai-2-4B-mlx-2bit",
+  "timestamp": "2026-11-14T11:47:13",
+  "chat": {
+    "ok": true,
+    "reply": "A ternary-weight language model is an artificial intelligence system that utilizes three distinct output values (typically representing \"continue,\" \"stop,\" or \"generate\") instead of the standard binary choice of predicting the next token, allowing for more nuanced and expressive language generation.",
+    "seconds": 6.923,
+    "usage": {
+      "prompt_tokens": 25,
+      "completion_tokens": 52,
+      "total_tokens": 77,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    }
+  },
+  "json": {
+    "ok": true,
+    "mode": "json_schema",
+    "constrained": true,
+    "seconds": 7.354,
+    "raw": "{\"name\": \"Maria Chen\", \"city\": \"Ithaca\", \"phone\": \"607-555-0142\", \"topic\": \"move the robotics demo to Saturday\", \"day\": \"Saturday\", \"attendees\": 4}",
+    "schema_errors": [],
+    "content_errors": []
+  },
+  "speed": {
+    "ok": true,
+    "warmup": {
+      "ttft_s": 0.3393,
+      "total_s": 14.3141,
+      "completion_tokens": 195,
+      "client_decode_tps": 13.88,
+      "server_decode_tps": 13.79,
+      "server_prompt_tps": 97.4
+    },
+    "runs": [
+      {
+        "ttft_s": 0.355,
+        "total_s": 14.1399,
+        "completion_tokens": 195,
+        "client_decode_tps": 14.07,
+        "server_decode_tps": 13.97,
+        "server_prompt_tps": 95.02
+      },
+      {
+        "ttft_s": 0.3564,
+        "total_s": 14.395,
+        "completion_tokens": 195,
+        "client_decode_tps": 13.82,
+        "server_decode_tps": 13.73,
+        "server_prompt_tps": 91.33
+      },
+      {
+        "ttft_s": 0.3501,
+        "total_s": 14.3114,
+        "completion_tokens": 195,
+        "client_decode_tps": 13.9,
+        "server_decode_tps": 13.8,
+        "server_prompt_tps": 96.17
+      }
+    ],
+    "summary": {
+      "ttft_ms_median": 355.0,
+      "client_decode_tps_median": 13.9,
+      "server_decode_tps_median": 13.8,
+      "server_prompt_tps_median": 95.02
+    }
+  }
+}

@@ -1,0 +1,25 @@
+# Machine-local: large models, caches, third-party checkouts, logs (recreate per README)
+/Bonsai-demo/
+/argmax-oss-swift/
+/local-ai-hackathon-samples/
+/models/
+/hf/
+/logs/
+
+# Build outputs and environments
+.build/
+.swiftpm/
+.venv*/
+__pycache__/
+*.pyc
+
+# Model weights, wherever they end up
+*.gguf
+*.safetensors
+*.mlmodelc/
+*.mlpackage/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
