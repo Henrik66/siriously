@@ -292,6 +292,7 @@ final class Mic: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     private let q = DispatchQueue(label: "ear.capture")
     private(set) var deviceName = "?"
     private(set) var samplesSeen = 0
+    private var settingsTimer: DispatchSourceTimer?
 
     init(seg: Segmenter) { self.seg = seg }
 
@@ -353,6 +354,27 @@ final class Mic: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     }
 
     func stop() { session.stopRunning() }
+
+    /// Follows {"listening": true|false} in ~/.siriously/settings.json (the menu bar switch). Paused = the
+    /// capture session is stopped, so macOS' orange mic indicator goes away too.
+    func followListeningSetting() {
+        let path = "\(stateDir)/settings.json"
+        var paused = false
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "ear.settings"))
+        settingsTimer = timer
+        timer.schedule(deadline: .now() + 1, repeating: 1.0)
+        timer.setEventHandler { [self] in
+            guard let d = FileManager.default.contents(atPath: path),
+                  let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+            let listening = (obj["listening"] as? Bool) ?? true
+            if !listening && !paused {
+                paused = true; session.stopRunning(); log("⏸  listening paused (menu bar / settings)")
+            } else if listening && paused {
+                paused = false; session.startRunning(); log("▶  listening resumed")
+            }
+        }
+        timer.resume()
+    }
 }
 
 func writeWav(_ samples: [Float], to path: String) throws {
@@ -540,6 +562,7 @@ func runDaemon(_ ear: Ear) async throws {
     seg.onUtterance = { clip, end in cont.yield((clip, end)) }
     try mic.start(name: opt.mic)
     mic.reportLevel(after: 3)
+    mic.followListeningSetting()
     log("brain: \(opt.brain)   end-of-speech silence: \(opt.silenceMs) ms   Ctrl-C to stop")
     var n = 0
     let runTag: String = { let f = DateFormatter(); f.dateFormat = "HHmmss"; return f.string(from: Date()) }()
@@ -567,10 +590,6 @@ func runDaemon(_ ear: Ear) async throws {
                           speaker: Speaker(verified: verified, score: score, name: verified ? (vp?.name ?? "anyone") : "unknown",
                                            threshold: vp == nil ? nil : thr),
                           audioS: secs, lockMs: lockMs)
-        var evData: [String: Any] = ["text": text, "verified": verified]
-        if let score { evData["score"] = Double(score) }
-        overlay.send(verified ? "heard" : "rejected", id: id, data: evData,
-                     msSinceEnd: Int(Date().timeIntervalSince(end) * 1000))
         let status = await post(u, to: opt.brain)
         log(String(format: "[%@] %.1fs  \"%@\"  stt %d ms  %@  e2e %d ms  %@", id, secs, text, sttMs,
                    score.map { String(format: "voice %+.2f %@", $0, verified ? "✓" : "✗ REJECTED") } ?? (vp == nil ? "lock off" : "voice ? ✗"),

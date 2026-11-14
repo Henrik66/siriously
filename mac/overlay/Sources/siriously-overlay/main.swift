@@ -10,7 +10,9 @@
 //   siriously-overlay [--rejected off|commands|all] [--show-listening] [--ws URL] [--udp-port 8766] [--demo]
 
 import AppKit
+import Combine
 import Network
+import SwiftUI
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
@@ -287,6 +289,7 @@ func looksLikeCommand(_ text: String) -> Bool {
 
 final class Controller {
     let hud = HUD()
+    var menu: MenuBar?
     private var current: String?
     private var busyUntil = Date.distantPast
     private var listening = false
@@ -298,6 +301,7 @@ final class Controller {
         let uid = str(ev["utterance_id"])
         let data = ev["data"] as? [String: Any] ?? [:]
         let ms = num(ev["ms_since_speech_end"])
+        menu?.store.record(type: type, uid: uid, data: data)
         let mine = uid == nil || uid == current
 
         switch type {
@@ -481,11 +485,280 @@ func runDemo(_ c: Controller) {
     DispatchQueue.main.asyncAfter(deadline: .now() + t + 5) { runDemo(c) }
 }
 
+// MARK: - Menu bar (status item + popover)
+
+let siriouslyDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".siriously")
+let settingsURL = siriouslyDir.appendingPathComponent("settings.json")
+
+struct PermissionCategory: Identifiable { let id: String; let label: String }
+let permissionCategories = [
+    PermissionCategory(id: "send_messages", label: "Sending messages"),
+    PermissionCategory(id: "delete", label: "Deleting"),
+    PermissionCategory(id: "purchases", label: "Purchases"),
+    PermissionCategory(id: "system", label: "Shut down, restart, log out"),
+    PermissionCategory(id: "quit_apps", label: "Quitting apps"),
+    PermissionCategory(id: "trash", label: "Moving to Trash"),
+]
+
+enum RecentStatus { case running, waiting, done, error, rejected }
+
+struct RecentItem: Identifiable {
+    let id: String
+    var text: String
+    var status: RecentStatus
+    var detail: String
+    let time: Date
+}
+
+/// Reads and writes ~/.siriously/settings.json (shared with the brain and the speech daemon; reloaded on change).
+final class SettingsStore: ObservableObject {
+    @Published var listening = true { didSet { if !loading { save() } } }
+    @Published var wakeWordRequired = true { didSet { if !loading { save() } } }
+    @Published var permissions: [String: String] = [:] { didSet { if !loading { save() } } }
+    @Published var recent: [RecentItem] = []
+    @Published var working = false
+    private(set) var wakeWord = "siriously"
+    private var raw: [String: Any] = [:]
+    private var mtime: Date?
+    private var loading = false
+
+    init() {
+        load()
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.reloadIfChanged() }
+    }
+
+    private func reloadIfChanged() {
+        let m = (try? FileManager.default.attributesOfItem(atPath: settingsURL.path))?[.modificationDate] as? Date
+        if m != mtime { load() }
+    }
+
+    func load() {
+        mtime = (try? FileManager.default.attributesOfItem(atPath: settingsURL.path))?[.modificationDate] as? Date
+        guard let d = try? Data(contentsOf: settingsURL),
+              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return }
+        loading = true
+        raw = obj
+        listening = (obj["listening"] as? Bool) ?? true
+        wakeWordRequired = (obj["wake_word_required"] as? Bool) ?? true
+        wakeWord = (obj["wake_word"] as? String) ?? "siriously"
+        permissions = (obj["permissions"] as? [String: String]) ?? [:]
+        loading = false
+    }
+
+    func save() {
+        raw["listening"] = listening
+        raw["wake_word_required"] = wakeWordRequired
+        var p = (raw["permissions"] as? [String: String]) ?? [:]
+        for (k, v) in permissions { p[k] = v }
+        raw["permissions"] = p
+        try? FileManager.default.createDirectory(at: siriouslyDir, withIntermediateDirectories: true)
+        if let d = try? JSONSerialization.data(withJSONObject: raw, options: [.prettyPrinted, .sortedKeys]) {
+            try? d.write(to: settingsURL, options: .atomic)
+            mtime = (try? FileManager.default.attributesOfItem(atPath: settingsURL.path))?[.modificationDate] as? Date
+        }
+    }
+
+    func binding(for category: String) -> Binding<String> {
+        Binding(get: { self.permissions[category] ?? "ask" }, set: { self.permissions[category] = $0 })
+    }
+
+    var statusLine: String {
+        if !listening { return "Paused" }
+        return wakeWordRequired ? "Listening for “\(wakeWord.capitalized)”" : "Listening to everything you say"
+    }
+
+    var voiceLockLine: String {
+        let url = siriouslyDir.appendingPathComponent("voiceprint.json")
+        guard let d = try? Data(contentsOf: url), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let n = o["nMe"] as? Int else { return "Voice lock not set up" }
+        return "Voice lock on · \(n) samples of your voice"
+    }
+
+    /// Fold overlay events into the "Recent" list and the working indicator.
+    func record(type: String, uid: String?, data: [String: Any]) {
+        let id = uid ?? UUID().uuidString
+        func update(_ f: (inout RecentItem) -> Void) {
+            if let i = recent.firstIndex(where: { $0.id == id }) { f(&recent[i]) }
+        }
+        switch type {
+        case "heard":
+            guard let text = data["text"] as? String, !text.hasPrefix("Listening") else { return }
+            if recent.contains(where: { $0.id == id }) { return }
+            recent.insert(RecentItem(id: id, text: pretty(text), status: .running, detail: "", time: Date()), at: 0)
+            working = true
+        case "rejected":
+            guard let text = data["text"] as? String else { return }
+            recent.insert(RecentItem(id: id, text: pretty(text), status: .rejected, detail: "Not your voice", time: Date()), at: 0)
+        case "plan":
+            update { $0.detail = (data["say"] as? String) ?? $0.detail }
+        case "confirm", "ask":
+            update { $0.status = .waiting; $0.detail = (data["say"] as? String) ?? "" }
+            working = false
+        case "done":
+            update { $0.status = .done; if let s = data["say"] as? String { $0.detail = s } }
+            working = false
+        case "route":
+            if (data["route"] as? String) == "none" {
+                update { $0.status = .error; $0.detail = (data["say"] as? String) ?? "No matching action" }
+                working = false
+            }
+        case "error":
+            update { $0.status = .error; $0.detail = (data["message"] as? String) ?? "Error" }
+            working = false
+        default:
+            break
+        }
+        if recent.count > 6 { recent.removeLast(recent.count - 6) }
+    }
+}
+
+struct RecentRow: View {
+    let item: RecentItem
+    var symbol: (String, Color) {
+        switch item.status {
+        case .running: return ("ellipsis", .secondary)
+        case .waiting: return ("questionmark.circle", .secondary)
+        case .done: return ("checkmark", .primary)
+        case .error: return ("exclamationmark.triangle", .orange)
+        case .rejected: return ("lock", .secondary)
+        }
+    }
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: symbol.0).foregroundStyle(symbol.1).frame(width: 14)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.text).lineLimit(1).truncationMode(.tail)
+                    .foregroundStyle(item.status == .rejected ? .secondary : .primary)
+                if !item.detail.isEmpty {
+                    Text(item.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 4)
+            Text(item.time, format: .dateTime.hour().minute()).font(.caption).monospacedDigit()
+                .foregroundStyle(.tertiary)
+        }
+    }
+}
+
+struct MenuView: View {
+    @ObservedObject var store: SettingsStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: store.listening ? "waveform" : "waveform.slash")
+                    .font(.system(size: 15, weight: .medium)).frame(width: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Siriously").font(.system(size: 13, weight: .semibold))
+                    Text(store.statusLine).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("Listening", isOn: $store.listening).toggleStyle(.switch).labelsHidden().controlSize(.small)
+            }
+            .padding(.bottom, 12)
+
+            Toggle(isOn: $store.wakeWordRequired) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Only respond to “Siriously”")
+                    Text("Follow-ups work for a few seconds without it").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch).controlSize(.small)
+            .disabled(!store.listening)
+
+            Divider().padding(.vertical, 12)
+
+            Text("Permissions").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                .padding(.bottom, 6)
+            VStack(spacing: 7) {
+                ForEach(permissionCategories) { c in
+                    HStack {
+                        Text(c.label).lineLimit(1)
+                        Spacer(minLength: 8)
+                        Picker(c.label, selection: store.binding(for: c.id)) {
+                            Text("Allow").tag("allow")
+                            Text("Ask").tag("ask")
+                            Text("Block").tag("block")
+                        }
+                        .pickerStyle(.segmented).labelsHidden().controlSize(.small).frame(width: 138)
+                    }
+                }
+            }
+
+            Divider().padding(.vertical, 12)
+
+            Text("Recent").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                .padding(.bottom, 6)
+            if store.recent.isEmpty {
+                Text(store.wakeWordRequired ? "Say “Siriously, open Safari”" : "Say “open Safari”")
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(store.recent.prefix(5)) { RecentRow(item: $0) }
+                }
+            }
+
+            Divider().padding(.vertical, 12)
+
+            HStack {
+                Text(store.voiceLockLine).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Quit") { NSApp.terminate(nil) }.buttonStyle(.borderless).font(.caption)
+            }
+        }
+        .font(.system(size: 12.5))
+        .padding(14)
+        .frame(width: 330)
+    }
+}
+
+final class MenuBar: NSObject {
+    let store = SettingsStore()
+    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let popover = NSPopover()
+    private var observers: [AnyCancellable] = []
+
+    override init() {
+        super.init()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentViewController = NSHostingController(rootView: MenuView(store: store))
+        if let b = item.button {
+            b.target = self
+            b.action = #selector(toggle)
+            b.toolTip = "Siriously"
+        }
+        updateIcon()
+        observers.append(store.$listening.sink { [weak self] _ in DispatchQueue.main.async { self?.updateIcon() } })
+        observers.append(store.$working.sink { [weak self] _ in DispatchQueue.main.async { self?.updateIcon() } })
+    }
+
+    private func updateIcon() {
+        let name = !store.listening ? "waveform.slash" : (store.working ? "waveform.circle.fill" : "waveform")
+        let img = NSImage(systemSymbolName: name, accessibilityDescription: "Siriously")
+            ?? NSImage(systemSymbolName: "waveform", accessibilityDescription: "Siriously")
+        img?.isTemplate = true
+        item.button?.image = img
+    }
+
+    @objc private func toggle() {
+        if popover.isShown {
+            popover.performClose(nil)
+        } else if let b = item.button {
+            store.load()
+            NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
+        }
+    }
+}
+
 // MARK: - main
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let controller = Controller()
+let menuBar = MenuBar()
+controller.menu = menuBar
 let udp = UDPInput(port: cfg.udpPort) { controller.handle($0) }
 let ws = WSInput(url: cfg.ws) { controller.handle($0) }
 print("siriously-overlay running (rejected: \(cfg.rejected), listening indicator: \(cfg.showListening ? "on" : "off"))")

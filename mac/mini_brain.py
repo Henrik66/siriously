@@ -3,21 +3,30 @@
 # dependencies = ["pyobjc-framework-ApplicationServices", "pyobjc-framework-Cocoa", "pyobjc-framework-Quartz"]
 # ///
 """Mini brain: Mac-side stand-in for the real brain (PRD §5), to test voice -> action end to end.
-The real brain is the teammate's; this one is deliberately small: fast path + Bonsai planner + confirmations.
+The real brain is the teammate's; this one is deliberately small: router + fast path + Bonsai planner.
 
     STT=none ./start_all.sh                      # Bonsai 2 4B on :8080 (for the planner)
     uv run --script mac/mini_brain.py            # 127.0.0.1:8765, then: mac/ear/.build/release/siriously-ear run
 
+Settings: ~/.siriously/settings.json (shared with the menu bar app and the speech daemon; reloaded on change)
+  listening, wake_word ("siriously"), wake_word_required, follow_up_seconds, permissions{category: allow|ask|block}
+
 Routing, in order (PRD §5.1):
-  1. pending confirmation: "yes" runs it, anything else cancels it
-  2. fast path (instant): open/switch to <installed app> · scroll up/down · undo · tabs · close window · copy/paste ·
-     "new note called X" · "type X" · "click <label>" · menu items by exact-ish name
-  3. planner (mac/planner.py, Bonsai 2 4B, ~1.5-2 s per call): anything else. Up to 3 rounds: it re-plans after
-     a failed step, and after opening another app when the plan still needs that app's buttons.
-Risky plans (send/post/delete/trash/quit/buy..., or typing + Enter in a chat/mail app) wait for a spoken "yes".
-Rejected voices are ignored. Keystrokes never go to a terminal (executor guard), so have a real app in front.
+  0. control words ("stop", "cancel", "never mind", "end action", "no") are handled the moment they arrive:
+     they halt the running plan between steps, drop pending questions/confirmations and clear the queue
+  1. addressed? Only "Siriously, …" (Whisper often writes "seriously"), or within follow_up_seconds of the
+     last command, or answering a question. Unaddressed speech is ignored silently (no overlay).
+  2. pending confirmation ("yes" runs it) or follow-up question (the answer resumes the task)
+  3. settings by voice: "always allow sending messages", "ask before deleting", "never allow purchases",
+     "turn off the wake word"
+  4. texting skill: "text <name> <message>" (recipient verified from the Messages window title)
+  5. fast path (instant): open/switch to <app> · scroll · undo · tabs · close window · copy/paste ·
+     new note called X · new folder [in downloads] called X · type X · click <label> · menu items by name
+  6. planner (mac/planner.py, Bonsai 2 4B): anything else; up to 3 rounds; at most one follow-up question
+Risky actions follow the permission for their category: allow (just do it), ask (say yes/no), block.
 Events for the overlay go to UDP :8766 in the PRD §4.6 shape.
 """
+import copy
 import difflib
 import json
 import os
@@ -38,28 +47,91 @@ PORT = 8765
 OVERLAY = ("127.0.0.1", 8766)
 MAX_ROUNDS = 3
 CONFIRM_TIMEOUT = 15
+CONFIRM_SLACK = 0.5      # a short "yes"/"stop" may score this much below the voice-lock threshold
 _udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+# ------------------------------------------------------------------------------------------------ settings
+SETTINGS_PATH = os.path.expanduser("~/.siriously/settings.json")
+DEFAULT_SETTINGS = {
+    "listening": True,
+    "wake_word": "siriously",
+    "wake_word_required": True,
+    "follow_up_seconds": 8,
+    "permissions": {"send_messages": "ask", "delete": "ask", "purchases": "block", "system": "ask",
+                    "quit_apps": "allow", "trash": "allow"},
+}
+CATEGORY_LABELS = {"send_messages": "Sending messages", "delete": "Deleting", "purchases": "Purchases",
+                   "system": "Shut down, restart, log out", "quit_apps": "Quitting apps", "trash": "Moving to Trash"}
+_settings_cache = {"mtime": None, "value": None}
+
+
+def load_settings():
+    try:
+        mtime = os.path.getmtime(SETTINGS_PATH)
+    except OSError:
+        mtime = None
+    if _settings_cache["value"] is not None and mtime == _settings_cache["mtime"]:
+        return _settings_cache["value"]
+    s = copy.deepcopy(DEFAULT_SETTINGS)
+    if mtime is not None:
+        try:
+            user = json.load(open(SETTINGS_PATH))
+            s.update({k: v for k, v in user.items() if k != "permissions"})
+            s["permissions"].update(user.get("permissions", {}))
+        except (OSError, ValueError):
+            pass
+    else:
+        save_settings(s)
+    _settings_cache.update(mtime=mtime, value=s)
+    return s
+
+
+def save_settings(s):
+    os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+    tmp = SETTINGS_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(s, f, indent=2)
+    os.replace(tmp, SETTINGS_PATH)
+    _settings_cache.update(mtime=None, value=None)
+
+
+# ------------------------------------------------------------------------------------------------ text utils
 KEYS = {"new tab": "cmd+t", "close tab": "cmd+w", "close window": "cmd+w", "close this window": "cmd+w",
         "next tab": "ctrl+tab", "previous tab": "ctrl+shift+tab", "copy": "cmd+c", "copy that": "cmd+c",
         "paste": "cmd+v", "paste that": "cmd+v", "select all": "cmd+a", "save": "cmd+s", "zoom in": "cmd+=",
         "zoom out": "cmd+-", "go back": "cmd+[", "go forward": "cmd+]", "new window": "cmd+n",
         "press enter": "return", "press return": "return", "enter": "return", "escape": "esc",
         "find": "cmd+f", "search": "cmd+f"}
-FILLER = re.compile(r"^(hey |ok |okay )?(siri(ously)?[, ]+)?(please |can you |could you )?")
+FILLER = re.compile(r"^(hey |ok |okay )?(please |can you |could you )?")
+FILLER_ONLY = re.compile(r"^(um+|uh+|hmm+|mm+|ah+|oh+|huh|okay so|so)$")
 YES_WORDS = {"yes", "yeah", "yep", "yup", "sure", "confirm", "confirmed", "ok", "okay", "absolutely", "correct",
              "affirmative"}
-NO_WORDS = {"no", "nope", "cancel", "stop", "don't", "dont", "never", "nah", "wait"}
-CONFIRM_SLACK = 0.5      # a "yes" may score this much below the voice-lock threshold (one-word clips score low)
-CHAT_APPS = {"Slack", "Messages", "Mail", "Discord", "WhatsApp", "Microsoft Teams", "Telegram", "Signal", "Outlook"}
-# Irreversible or outward-facing only. Move to Trash (undoable) and quitting an app (it asks about unsaved work) don't ask.
-RISKY = re.compile(r"\b(send|post|reply|forward|delete|empty|erase|shut ?down|restart|log ?out|"
-                   r"buy|purchase|pay|order|uninstall|format|unsubscribe|submit)\b")
-RISKY_KEYS = {"cmd+shift+delete", "cmd+option+shift+delete", "cmd+option+esc", "cmd+shift+q", "cmd+option+delete"}
+NO_WORDS = {"no", "nope", "cancel", "stop", "don't", "dont", "never", "nah", "wait", "neither", "nothing"}
+STOP_RX = re.compile(r"^(?:(?:stop|cancel|never ?mind|forget it|forget about it|end action|abort|halt|neither|nothing|"
+                     r"no+|nope|nah)(?: it| that| this| please| now| the action)*\s*)+$")
+ORDINALS = {"one": 0, "first": 0, "1": 0, "two": 1, "second": 1, "2": 1, "to": 1, "too": 1, "three": 2, "third": 2,
+            "3": 2, "four": 3, "fourth": 3, "4": 3}
+WAKE_VARIANTS = {"siriously": r"(?:siriously|seriously|siri ?ously|sirius ?ly|sirious|cereusly|serious ?ly|seriosly)"}
 PAST = {"sent": "Send", "moved": "Move", "deleted": "Delete", "created": "Create", "opened": "Open", "closed": "Close",
         "emptied": "Empty", "posted": "Post", "replied": "Reply", "forwarded": "Forward", "searched": "Search",
         "sending": "Send", "deleting": "Delete", "moving": "Move", "creating": "Create", "searching": "Search",
         "opening": "Open", "posting": "Post", "replying": "Reply"}
+FINDER_PLACES = {"downloads": "cmd+option+l", "desktop": "cmd+shift+d", "documents": "cmd+shift+o",
+                 "home": "cmd+shift+h", "applications": "cmd+shift+a"}
+
+
+def norm(text):
+    t = text.lower().strip()
+    t = re.sub(r"[^\w\s']", " ", t)
+    t = " ".join(t.split())
+    t = FILLER.sub("", t)
+    return re.sub(r"( please| for me| now)$", "", t).strip()
+
+
+def wake_rx(settings):
+    w = (settings.get("wake_word") or "siriously").lower().strip()
+    core = WAKE_VARIANTS.get(w, r"\s+".join(map(re.escape, w.split())))
+    return re.compile(r"^\W*(?:(?:hey|hi|ok|okay|yo)\W+)?" + core + r"\b\W*", re.I)
 
 
 def is_yes(t):
@@ -79,93 +151,9 @@ def tidy_say(say):
     return say
 
 
-def emit(kind, uid, data=None, t_end=None):
-    ev = {"type": kind, "utterance_id": uid, "data": data or {}}
-    if t_end:
-        ev["ms_since_speech_end"] = round((time.time() - t_end) * 1000)
-    try:
-        _udp.sendto(json.dumps(ev, ensure_ascii=False).encode(), OVERLAY)
-    except OSError:
-        pass
-
-
-def log(msg):
-    print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
-
-
-def norm(text):
-    t = text.lower().strip()
-    t = re.sub(r"[^\w\s']", " ", t)
-    t = " ".join(t.split())
-    t = FILLER.sub("", t)
-    return re.sub(r"( please| for me| now)$", "", t).strip()
-
-
 def best(query, labels, cutoff):
     m = difflib.get_close_matches(query, labels, n=1, cutoff=cutoff)
     return m[0] if m else None
-
-
-def fast_path(t, snap, apps):
-    """(description, [actions]) for instant commands, else (None, None)."""
-    k = re.sub(r"^(?:go to |switch to |open |do )?(?:the |a )?", "", t)
-    if k in KEYS:
-        return k.capitalize(), [{"op": "keys", "keys": KEYS[k]}]
-    if m := re.match(r"^(?:open|launch|start|switch to|go to|bring up|show)\s+(?:the\s+)?(?:app\s+)?(.+?)(?:\s+app)?$", t):
-        name = match_app(m.group(1), apps)
-        if name and not re.match(r"^(a |an |new |my )", m.group(1)):
-            return f"Open {name}", [{"op": "open_app", "app": name}]
-    if m := re.match(r"^scroll\s+(up|down)(?:\s+(a bit|a little|a lot|more))?$", t):
-        amt = {"a bit": 2, "a little": 2, "a lot": 12, "more": 8}.get(m.group(2) or "", 5)
-        return f"Scroll {m.group(1)}", [{"op": "scroll", "direction": m.group(1), "amount": amt}]
-    if re.match(r"^undo( that| it)?$", t):
-        return "Undo", [{"op": "keys", "keys": "cmd+z"}]
-    if m := re.match(r"^(?:start |create |make )?(?:a )?new note(?: called| named| titled)?\s*(.*)$", t):
-        title = m.group(1).strip()
-        acts = [{"op": "open_app", "app": "Notes"}, {"op": "keys", "keys": "cmd+n"}]
-        if title:
-            acts.append({"op": "type", "text": title})
-        return (f"New note “{title}”" if title else "New note"), acts
-    if m := re.match(r"^(?:make |create )?(?:a )?new folder(?: called| named)?\s*(.*)$", t):
-        name = m.group(1).strip()
-        acts = [] if snap["app"]["name"] == "Finder" else [{"op": "open_app", "app": "Finder"}]
-        acts += [{"op": "keys", "keys": "cmd+shift+n"}]
-        if name:
-            acts += [{"op": "type", "text": name}, {"op": "keys", "keys": "return"}]
-        return (f"New folder “{name}”" if name else "New folder"), acts
-    if m := re.match(r"^(?:type|write|dictate)\s+(.+)$", t):
-        return "Type", [{"op": "type", "text": m.group(1)}]
-    els = {i["label"].lower(): i for i in snap["items"] if i["kind"] == "element" and i["label"]}
-    if m := re.match(r"^(?:click|press|tap|hit|select)\s+(?:on\s+)?(?:the\s+)?(.+?)(?:\s+button)?$", t):
-        lbl = best(m.group(1), list(els), 0.75)
-        if lbl:
-            return f"Click “{els[lbl]['label']}”", [{"op": "press", "target": els[lbl]["id"]}]
-    menus = {i["path"][-1].lower().rstrip("…."): i for i in snap["items"] if i["kind"] == "menu" and i["enabled"]}
-    lbl = best(t, list(menus), 0.9)
-    if lbl:
-        return menus[lbl]["label"], [{"op": "menu", "target": menus[lbl]["id"]}]
-    return None, None
-
-
-APP_ALIASES = [(r"\b(system )?settings\b|\bpreferences\b", "System Settings"), (r"^text\b|\bimessage\b", "Messages")]
-
-
-def mentioned_app(t, apps):
-    """App the request is about, if it says so: "... in Safari", "open the bluetooth settings", "text hari hello".
-    Only explicit mentions (alias, or app name after in/on/using/with/from/open/to) so 'the weather' != Weather."""
-    for pat, app in APP_ALIASES:
-        if re.search(pat, t) and app in apps:
-            return app
-    for name in sorted(apps, key=len, reverse=True):
-        n = re.escape(name.lower())
-        if re.search(rf"\b(in|on|using|with|from|open|launch|to)\s+(the\s+)?{n}( app)?\b", t):
-            return name
-    return None
-
-
-ORDINALS = {"one": 0, "first": 0, "1": 0, "two": 1, "second": 1, "2": 1, "to": 1, "too": 1, "three": 2, "third": 2,
-            "3": 2, "four": 3, "fourth": 3, "4": 3}
-FILLER_ONLY = re.compile(r"^(um+|uh+|hmm+|mm+|ah+|oh+|huh|okay so|so)$")
 
 
 def pick_option(t, options):
@@ -180,6 +168,81 @@ def pick_option(t, options):
     return best_i if best_i is not None and scores[best_i] >= 0.9 else None
 
 
+# ------------------------------------------------------------------------------------------------ permissions
+CMD_RISK = [("purchases", r"\b(buy|purchase|pay|order|checkout)\b"),
+            ("system", r"\b(shut ?down|restart|reboot|log ?out|sign out)\b"),
+            ("delete", r"\b(delete|erase|empty)\b"),
+            ("send_messages", r"\b(send|post|reply|forward)\b"),
+            ("quit_apps", r"\bquit\b"),
+            ("trash", r"\btrash\b")]
+KEY_RISK = {"cmd+shift+delete": "delete", "cmd+option+shift+delete": "delete", "cmd+option+delete": "delete",
+            "cmd+shift+q": "system", "cmd+option+shift+q": "system", "cmd+q": "quit_apps",
+            "cmd+delete": "trash", "cmd+backspace": "trash"}
+SETTING_WORDS = [("purchases", r"\b(buy|buying|purchases?|pay|paying|payments?|orders?|checkout)\b"),
+                 ("system", r"\b(shut ?down|shutting down|restart|restarting|reboot|log ?out|logging out)\b"),
+                 ("delete", r"\b(delet\w*|eras\w*|empty\w*)\b"),
+                 ("send_messages", r"\b(send\w*|messag\w*|text\w*|post\w*|repl\w*|forward\w*|emails?)\b"),
+                 ("quit_apps", r"\b(quit\w*)\b"),
+                 ("trash", r"\btrash\b")]
+CHAT_APPS = {"Slack", "Messages", "Mail", "Discord", "WhatsApp", "Microsoft Teams", "Telegram", "Signal", "Outlook"}
+STRICTNESS = {"allow": 0, "ask": 1, "block": 2}
+
+
+def risk_categories(text, snap, actions):
+    cats = set()
+    t = text.lower()
+    for cat, rx in CMD_RISK:
+        if re.search(rx, t):
+            cats.add(cat)
+    labels = {i["id"]: i["label"] for i in snap["items"]}
+    apps = {snap["app"]["name"]} | {a.get("app", "") for a in actions if a["op"] == "open_app"}
+    for n, a in enumerate(actions):
+        if a["op"] in ("press", "menu"):
+            lab = labels.get(a.get("target"), "").lower()
+            cats |= {cat for cat, rx in CMD_RISK if re.search(rx, lab)}
+        if a["op"] == "keys":
+            k = a["keys"].lower()
+            if k in KEY_RISK:
+                cats.add(KEY_RISK[k])
+            if k == "return" and apps & CHAT_APPS and any(b["op"] == "type" for b in actions[:n]):
+                cats.add("send_messages")
+    if "delete" in cats and "trash" in cats and "empty" not in t:
+        cats.discard("delete")                       # "delete the file" in Finder = Move to Trash
+    return cats
+
+
+def policy(cats, settings):
+    if not cats:
+        return "allow", None
+    perms = settings["permissions"]
+    cat = max(cats, key=lambda c: STRICTNESS.get(perms.get(c, "ask"), 1))
+    return perms.get(cat, "ask"), cat
+
+
+SET_ALLOW = re.compile(r"^(?:always allow|allow|stop asking(?: me)?(?: about| before| for| when)?|don'?t ask(?: me)?"
+                       r"(?: about| before| for| when)?|no need to ask(?: about| before| for)?)\s+(.+)$")
+SET_ASK = re.compile(r"^(?:always ask(?: me)?(?: about| before| for| when)?|ask(?: me)? (?:before|about|for|when)|"
+                     r"confirm before)\s+(.+)$")
+SET_BLOCK = re.compile(r"^(?:never allow|don'?t allow|block all|never let (?:you|me))\s+(.+)$")
+WAKE_OFF = re.compile(r"^(?:turn off|disable|stop requiring|don'?t require|no more) (?:the )?wake ?word$")
+WAKE_ON = re.compile(r"^(?:turn on|enable|require) (?:the )?wake ?word$")
+
+
+def settings_command(t):
+    """-> (kind, value) for voice settings commands, else None."""
+    if WAKE_OFF.match(t):
+        return "wake", False
+    if WAKE_ON.match(t):
+        return "wake", True
+    for rx, mode in ((SET_BLOCK, "block"), (SET_ASK, "ask"), (SET_ALLOW, "allow")):
+        if m := rx.match(t):
+            for cat, words in SETTING_WORDS:
+                if re.search(words, m.group(1)):
+                    return "perm", (cat, mode)
+    return None
+
+
+# ------------------------------------------------------------------------------------------------ Messages
 def conversations(snap):
     """Recent Messages conversations from the sidebar: [(name, item)]. Labels look like
     'Hariprasad Gridharan, I cant bro, 2:31 PM' (pinned: 'kat, CIS 142, …')."""
@@ -202,15 +265,16 @@ def match_people(query, convos):
     hits = []
     for name, item in convos:
         parts = [_nm(p) for p in name.split()]
-        ok = all(any(p.startswith(x) or difflib.SequenceMatcher(None, x, p[:len(x) + 1]).ratio() >= 0.75 for p in parts)
-                 for x in q)
-        if ok:
+        if all(any(p.startswith(x) or difflib.SequenceMatcher(None, x, p[:len(x) + 1]).ratio() >= 0.75 for p in parts)
+               for x in q):
             hits.append((name, item))
-    seen, uniq = set(), []
+    uniq, seen = [], set()
     for name, item in hits:
         if name not in seen:
             seen.add(name); uniq.append((name, item))
-    return uniq
+    # "Hariprasad" (pinned, first name) and "Hariprasad Gridharan" are the same person: keep the full name
+    full = [n for n, _ in uniq]
+    return [(n, i) for n, i in uniq if not any(o != n and o.lower().startswith(n.lower() + " ") for o in full)]
 
 
 TEXT_CMD = [re.compile(r"^(?:text|imessage)\s+(.+)$"),
@@ -219,7 +283,6 @@ TEXT_CMD = [re.compile(r"^(?:text|imessage)\s+(.+)$"),
 
 
 def parse_text_command(t, front_app):
-    """'text hari hello' -> 'hari hello' (name + message still joined; split once we can see conversations)."""
     for n, rx in enumerate(TEXT_CMD):
         if n == 2 and front_app in CHAT_APPS - {"Messages"}:
             continue                                  # "message the channel …" in Slack is not an iMessage
@@ -228,35 +291,152 @@ def parse_text_command(t, front_app):
     return None
 
 
-def needs_confirm(text, snap, actions):
-    labels = {i["id"]: i["label"] for i in snap["items"]}
-    apps = {snap["app"]["name"]} | {a.get("app", "") for a in actions if a["op"] == "open_app"}
-    if RISKY.search(text.lower()):
-        return True
-    for n, a in enumerate(actions):
-        if a["op"] in ("press", "menu") and RISKY.search(labels.get(a.get("target"), "").lower()):
-            return True
-        if a["op"] == "keys" and a["keys"].lower() in RISKY_KEYS:
-            return True
-        if a["op"] == "keys" and a["keys"].lower() == "return" and apps & CHAT_APPS \
-                and any(b["op"] == "type" for b in actions[:n]):
-            return True
-    return False
+# ------------------------------------------------------------------------------------------------ fast path
+def fast_path(t, snap, apps):
+    """(description, [actions]) for instant commands, else (None, None)."""
+    t = re.sub(r"^(?:in|on) (?:the )?finder\s+", "", t)
+    k = re.sub(r"^(?:go to |switch to |open |do )?(?:the |a )?", "", t)
+    if k in KEYS:
+        return k.capitalize(), [{"op": "keys", "keys": KEYS[k]}]
+    place_rx = r"(?:\s+(?:in|on|inside)\s+(?:the |my )?(downloads|desktop|documents|home|applications)(?: folder)?)?"
+    if m := re.match(r"^(?:make |create )?(?:a )?new folder" + place_rx +
+                     r"(?:\s+(?:called|named|titled)\s+(.+?))?" + place_rx + "$", t):
+        place, name = m.group(1) or m.group(3), (m.group(2) or "").strip()
+        acts = [] if snap["app"]["name"] == "Finder" else [{"op": "open_app", "app": "Finder"}]
+        if place:
+            acts.append({"op": "keys", "keys": FINDER_PLACES[place]})
+        acts.append({"op": "keys", "keys": "cmd+shift+n"})
+        if name:
+            acts += [{"op": "type", "text": name}, {"op": "keys", "keys": "return"}]
+        where = f" in {place.title()}" if place else ""
+        return (f"New folder “{name}”{where}" if name else f"New folder{where}"), acts
+    if m := re.match(r"^(?:open|launch|start|switch to|go to|bring up|show)\s+(?:the\s+)?(?:app\s+)?(.+?)(?:\s+app)?$", t):
+        name = match_app(m.group(1), apps)
+        if name and not re.match(r"^(a |an |new |my )", m.group(1)):
+            return f"Open {name}", [{"op": "open_app", "app": name}]
+    if m := re.match(r"^scroll\s+(up|down)(?:\s+(a bit|a little|a lot|more))?$", t):
+        amt = {"a bit": 2, "a little": 2, "a lot": 12, "more": 8}.get(m.group(2) or "", 5)
+        return f"Scroll {m.group(1)}", [{"op": "scroll", "direction": m.group(1), "amount": amt}]
+    if re.match(r"^undo( that| it)?$", t):
+        return "Undo", [{"op": "keys", "keys": "cmd+z"}]
+    if m := re.match(r"^(?:start |create |make )?(?:a )?new note(?: called| named| titled)?\s*(.*)$", t):
+        title = m.group(1).strip()
+        acts = [{"op": "open_app", "app": "Notes"}, {"op": "keys", "keys": "cmd+n"}]
+        if title:
+            acts.append({"op": "type", "text": title})
+        return (f"New note “{title}”" if title else "New note"), acts
+    if m := re.match(r"^(?:type|write|dictate)\s+(.+)$", t):
+        return "Type", [{"op": "type", "text": m.group(1)}]
+    els = {i["label"].lower(): i for i in snap["items"] if i["kind"] == "element" and i["label"]}
+    if m := re.match(r"^(?:click|press|tap|hit|select)\s+(?:on\s+)?(?:the\s+)?(.+?)(?:\s+button)?$", t):
+        lbl = best(m.group(1), list(els), 0.75)
+        if lbl:
+            return f"Click “{els[lbl]['label']}”", [{"op": "press", "target": els[lbl]["id"]}]
+    menus = {i["path"][-1].lower().rstrip("…."): i for i in snap["items"] if i["kind"] == "menu" and i["enabled"]}
+    lbl = best(t, list(menus), 0.9)
+    if lbl:
+        return menus[lbl]["label"], [{"op": "menu", "target": menus[lbl]["id"]}]
+    return None, None
+
+
+APP_ALIASES = [(r"\b(system )?settings\b|\bpreferences\b", "System Settings"), (r"^text\b|\bimessage\b", "Messages")]
+
+
+def mentioned_app(t, apps):
+    """App the request is about, if it says so: "... in Safari", "open the bluetooth settings"."""
+    for pat, app in APP_ALIASES:
+        if re.search(pat, t) and app in apps:
+            return app
+    for name in sorted(apps, key=len, reverse=True):
+        n = re.escape(name.lower())
+        if re.search(rf"\b(in|on|using|with|from|open|launch|to)\s+(the\s+)?{n}( app)?\b", t):
+            return name
+    return None
+
+
+# ------------------------------------------------------------------------------------------------ events
+def emit(kind, uid, data=None, t_end=None):
+    ev = {"type": kind, "utterance_id": uid, "data": data or {}}
+    if t_end:
+        ev["ms_since_speech_end"] = round((time.time() - t_end) * 1000)
+    try:
+        _udp.sendto(json.dumps(ev, ensure_ascii=False).encode(), OVERLAY)
+    except OSError:
+        pass
+
+
+def log(msg):
+    print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+
+# ------------------------------------------------------------------------------------------------ brain
+class Stopped(Exception):
+    pass
 
 
 class Brain:
-    def __init__(self):
+    def __init__(self, q):
+        self.q = q
         self.ui = MacUIProvider()
         self.ex = MacExecutor(self.ui)
         self.apps = self.ui.list_apps()
         self.pending = None          # confirmation: {"uid", "say", "actions", "sid", "t", "cancel"}
-        self.awaiting = None         # follow-up question: {"say", "options", "resume": fn(answer, uid, t_end), "t"}
+        self.awaiting = None         # follow-up question: {"say", "options", "resume", "t"}
+        self.cancel = threading.Event()
+        self.busy = False
+        self.last_active = 0.0
+
+    # ---------------------------------------------------------------- called from the HTTP thread
+    def speaker_ok(self, u, short_reply=False):
+        sp = u.get("speaker", {})
+        if sp.get("verified"):
+            return True
+        score, thr = sp.get("score"), sp.get("threshold")
+        return short_reply and score is not None and thr is not None and score >= thr - CONFIRM_SLACK
+
+    def strip_wake(self, text, settings):
+        m = wake_rx(settings).match(text or "")
+        return (True, text[m.end():].strip()) if m else (False, text or "")
+
+    def try_stop(self, u):
+        """Control words act immediately (PRD R1: < 50 ms), never queued behind a running plan."""
+        _, body = self.strip_wake(u.get("text", ""), load_settings())
+        if not STOP_RX.match(norm(body)) or not self.speaker_ok(u, short_reply=True):
+            return False
+        active = self.busy or self.pending or self.awaiting or not self.q.empty()
+        if not active:
+            return True                                   # nothing to stop: swallow quietly
+        self.cancel.set()
+        drained = 0
+        while True:
+            try:
+                self.q.get_nowait(); drained += 1
+            except queue.Empty:
+                break
+        p, self.pending, self.awaiting = self.pending, None, None
+        if p and p.get("cancel"):
+            self.q.put({"_cleanup": p["cancel"], "sid": p["sid"]})   # executor work stays on the worker thread
+        log(f"■ {u.get('text')!r} -> stop (running={self.busy}, dropped {drained} queued)")
+        emit("heard", u.get("id"), {"text": body or u.get("text")})
+        emit("done", u.get("id"), {"say": "Stopped" if self.busy else "Cancelled"})
+        self.last_active = time.time()
+        return True
+
+    # ---------------------------------------------------------------- worker thread
+    def fail(self, uid, msg):
+        if self.cancel.is_set():
+            return
+        log(f"     ✗ {msg}")
+        emit("error", uid, {"message": msg})
 
     def execute(self, uid, actions, sid, total=None, offset=0):
-        """Run actions in order. -> (ok, error, last_snapshot)"""
+        """Run actions in order. -> (ok, error, last_snapshot). Stops between steps when cancelled."""
         labels = {i["id"]: i["label"] for i in (self.ui.get_snapshot(sid) or {"items": []})["items"]}
         snap = None
         for n, a in enumerate(actions, 1):
+            if self.cancel.is_set():
+                log("     ■ stopped before " + json.dumps(a, ensure_ascii=False))
+                return False, "Stopped", snap
             emit("action", uid, {"index": offset + n, "of": total or len(actions), "action": a,
                                  "label": labels.get(a.get("target"))})
             r = self.ex.run(sid, a)
@@ -267,119 +447,166 @@ class Brain:
                 return False, r["error"], snap
         return True, None, snap
 
-    def handle(self, u):
-        uid, text, t_end = u.get("id"), u.get("text", ""), u.get("t_speech_end")
-        sp = u.get("speaker", {})
-        t = norm(text)
-        if not sp.get("verified"):
-            score, thr = sp.get("score"), sp.get("threshold")
-            near = score is not None and thr is not None and score >= thr - CONFIRM_SLACK
-            if not (self.pending and is_yes(t) and near):
-                log(f"✗ ignored (voice lock, score {score}): {text!r}")
-                return
-            log(f"   accepting short confirmation {text!r} (score {score:.2f}, threshold {thr:.2f})")
+    def finish(self, uid, t_end, say=None):
+        if not self.cancel.is_set():
+            emit("done", uid, {"say": say} if say else {}, t_end)
+            if t_end:
+                log(f"     done {(time.time() - t_end) * 1000:.0f} ms after you stopped talking")
 
-        # 1. pending confirmation
+    def gate(self, uid, text, say, acts, snap, cancel=None):
+        """Apply the permission for the actions' risk category. True = handled (asked or blocked)."""
+        mode, cat = policy(risk_categories(text, snap, acts), load_settings())
+        if mode == "block":
+            self.fail(uid, f"{CATEGORY_LABELS.get(cat, cat)} is blocked in your settings")
+            return True
+        if mode == "ask":
+            if snap["app"]["name"] in CHAT_APPS and snap.get("window") and cat == "send_messages":
+                typed = next((a["text"] for a in acts if a["op"] == "type"), None)
+                if typed and "“" not in say:
+                    say = f"Send “{typed}” to {snap['window']}"
+            self.confirm(uid, say, acts, snap, cancel)
+            return True
+        return False
+
+    def handle(self, u):
+        if "_cleanup" in u:                                      # undo a cancelled draft
+            self.cancel.clear()
+            self.execute(None, u["_cleanup"], u["sid"])
+            return
+        uid, raw, t_end = u.get("id"), u.get("text", ""), u.get("t_speech_end")
+        st = load_settings()
+        woke, body = self.strip_wake(raw, st)
+        t = norm(body)
+        following = time.time() - self.last_active < st.get("follow_up_seconds", 8)
+        addressed = woke or not st.get("wake_word_required", True) or self.pending or self.awaiting or following \
+            or u.get("internal")
+
+        if not self.speaker_ok(u, short_reply=bool((self.pending or self.awaiting) and len(t.split()) <= 4)):
+            if woke:
+                emit("rejected", uid, {"text": body or raw})
+            log(f"✗ ignored (voice lock, score {u.get('speaker', {}).get('score')}): {raw!r}")
+            return
+        if not addressed:
+            log(f"· not addressed: {raw!r}")
+            return
+        if woke and not t:                                       # just "Siriously"
+            self.last_active = time.time()
+            emit("heard", uid, {"text": "Listening…"})
+            return
+        if not u.get("internal"):
+            emit("heard", uid, {"text": body})
+        self.last_active = time.time()
+
+        # 2a. pending confirmation
         if self.pending:
             p, self.pending = self.pending, None
             if time.time() - p["t"] < CONFIRM_TIMEOUT and is_yes(t):
-                log(f"✓ {text!r} -> confirmed: {p['say']}")
-                emit("plan", uid, {"say": p["say"], "steps": len(p["actions"])})   # overlay follows this utterance
+                log(f"✓ {raw!r} -> confirmed: {p['say']}")
+                emit("plan", uid, {"say": p["say"], "steps": len(p["actions"])})
                 ok, err, _ = self.execute(uid, p["actions"], p["sid"])
-                if ok:
-                    emit("done", uid, {}, t_end)
-                else:
-                    emit("error", uid, {"message": err})
-                return
-            log(f"   pending '{p['say']}' cancelled by {text!r}")
+                return self.finish(uid, t_end) if ok else self.fail(uid, err)
+            log(f"   pending '{p['say']}' cancelled by {raw!r}")
             if p.get("cancel"):
                 self.execute(uid, p["cancel"], p["sid"])
             emit("done", uid, {"say": "Cancelled"})
             if not t or t.split()[0] in NO_WORDS or t.startswith("never mind"):
                 return
-
-        # 1b. answer to a follow-up question
+        # 2b. answer to a follow-up question
         if self.awaiting:
             a, self.awaiting = self.awaiting, None
             if time.time() - a["t"] < CONFIRM_TIMEOUT + 5 and t and t.split()[0] not in NO_WORDS:
-                log(f"✓ {text!r} -> answer to {a['say']!r}")
-                a["resume"](text, uid, t_end)
-                return
+                log(f"✓ {raw!r} -> answer to {a['say']!r}")
+                return a["resume"](body, uid, t_end)
             log(f"   question {a['say']!r} dropped")
-            emit("done", uid, {"say": "Cancelled"})
-            return
-
+            return emit("done", uid, {"say": "Cancelled"})
         if not t or FILLER_ONLY.match(t) or all(w in NO_WORDS for w in t.split()):
-            log(f"   ignored filler {text!r}")
-            return
+            return log(f"   ignored filler {raw!r}")
+
+        # 3. settings by voice
+        if cmd := settings_command(t):
+            kind, val = cmd
+            s = copy.deepcopy(load_settings())
+            if kind == "wake":
+                s["wake_word_required"] = val
+                say = f"Wake word {'on' if val else 'off'}"
+            else:
+                cat, mode = val
+                s["permissions"][cat] = mode
+                say = f"{CATEGORY_LABELS[cat]}: {dict(allow='allowed', ask='will ask', block='blocked')[mode]}"
+            save_settings(s)
+            log(f"✓ {raw!r} -> settings: {say}")
+            return self.finish(uid, None, say)
 
         snap = self.ui.snapshot()
-        # 2a. texting skill (deterministic: the recipient is read back from the screen, never assumed)
+        # 4. texting skill
         rest = parse_text_command(t, snap["app"]["name"])
         if rest:
-            log(f"✓ {text!r} -> text message flow  [in {snap['app']['name']}]")
+            log(f"✓ {raw!r} -> text message flow  [in {snap['app']['name']}]")
             return self.text_flow(uid, rest, snap, t_end)
-        # 2b. fast path
+        # 5. fast path
         desc, acts = fast_path(t, snap, self.apps)
         if acts:
-            log(f"✓ {text!r} -> {desc}  [fast path, in {snap['app']['name']}]")
-            if needs_confirm(text, snap, acts):
-                return self.ask(uid, desc, acts, snap)
+            log(f"✓ {raw!r} -> {desc}  [fast path, in {snap['app']['name']}]")
+            if self.gate(uid, body, desc, acts, snap):
+                return
             emit("plan", uid, {"say": desc, "steps": len(acts)})
-            ok, err, _ = self.execute(uid, acts, snap["snapshot_id"])
-            emit("done", uid, {}, t_end) if ok else emit("error", uid, {"message": err})
-            log(f"     done {(time.time() - t_end) * 1000:.0f} ms after you stopped talking")
-            return
+            ok, err, last = self.execute(uid, acts, snap["snapshot_id"])
+            if not ok:
+                return self.fail(uid, err)
+            if desc.startswith("New folder “") and last:
+                return self.check_folder_name(uid, desc, last, t_end)
+            return self.finish(uid, t_end)
+        # 6. planner
+        return self.run_planner(u, body, t, snap, t_end)
 
-        # 3. planner. If the request names another app, open it first so the planner sees the right screen.
-        log(f"✓ {text!r} -> planner  [in {snap['app']['name']}]")
+    def run_planner(self, u, body, t, snap, t_end):
+        uid = u.get("id")
+        log(f"✓ {body!r} -> planner  [in {snap['app']['name']}]")
         emit("route", uid, {"route": "planner"})
         done, error, steps = [], None, 0
         target_app = mentioned_app(t, self.apps)
         if target_app and target_app != snap["app"]["name"]:
             ok, err, snap2 = self.execute(uid, [{"op": "open_app", "app": target_app}], snap["snapshot_id"])
             if not ok:
-                emit("error", uid, {"message": err})
-                return
+                return self.fail(uid, err)
             snap, steps = snap2, 1
             done.append(f"open_app {target_app}")
         for rnd in range(MAX_ROUNDS):
+            if self.cancel.is_set():
+                return
             try:
-                p = planner.plan(text, snap, done, error)
+                p = planner.plan(body, snap, done, error)
             except Exception as e:                      # server down, timeout, bad JSON
                 log(f"     planner failed: {type(e).__name__}: {e}")
-                emit("error", uid, {"message": "Planner unavailable (is Bonsai running?)"})
-                return
+                return self.fail(uid, "Planner unavailable (is Bonsai running?)")
             acts = p["actions"]
+            log(f"     plan r{rnd + 1} ({p['ms']} ms, {p['new_prompt_tokens']} new tokens): {p['say']!r} "
+                f"{json.dumps(acts, ensure_ascii=False)}" + (f"  ask={p['ask']!r}" if p.get("ask") else ""))
             if p.get("ask") and not acts:
-                log(f"     planner asks: {p['ask']!r}")
-                original = text
+                if u.get("no_ask"):
+                    return self.fail(uid, "Not sure what to do with that")
+                original = body
                 return self.ask_question(uid, p["ask"], [],
                                          lambda ans, uid2, t2: self.handle({"id": uid2, "text": f"{original} ({ans})",
-                                                                            "t_speech_end": t2,
+                                                                            "t_speech_end": t2, "internal": True,
+                                                                            "no_ask": True,
                                                                             "speaker": {"verified": True}}))
-            log(f"     plan r{rnd + 1} ({p['ms']} ms, {p['new_prompt_tokens']} new tokens): {p['say']!r} "
-                f"{json.dumps(acts, ensure_ascii=False)}")
             if not acts:
                 if rnd == 0:
                     emit("route", uid, {"route": "none", "say": p["say"] or "Can't do that"})
-                else:
-                    emit("done", uid, {}, t_end)
+                    return
+                return self.finish(uid, t_end)
+            if rnd == 0 and self.gate(uid, body, tidy_say(p["say"]), acts, snap):
                 return
-            if needs_confirm(text if rnd == 0 else "", snap, acts):
-                say = p["say"]
-                if snap["app"]["name"] in CHAT_APPS and snap.get("window"):
-                    typed = next((a["text"] for a in acts if a["op"] == "type"), None)
-                    say = f"Send “{typed}” to {snap['window']}" if typed else f"{say} (in {snap['window']})"
-                return self.ask(uid, say, acts, snap)
             emit("plan", uid, {"say": tidy_say(p["say"]), "steps": steps + len(acts)})
-            # After open_app, ids of the old app are meaningless: stop there and re-plan in the new app.
-            cut = len(acts)
+            cut = len(acts)                              # after open_app, the old app's ids are meaningless
             for k, a in enumerate(acts):
                 if a["op"] == "open_app" and any("target" in b for b in acts[k + 1:]):
                     cut = k + 1
                     break
             ok, err, snap2 = self.execute(uid, acts[:cut], snap["snapshot_id"], total=steps + len(acts), offset=steps)
+            if self.cancel.is_set():
+                return
             steps += cut if ok else 0
             snap = snap2 or self.ui.snapshot()
             if not ok:
@@ -391,22 +618,41 @@ class Brain:
                 done.append(f"open_app {acts[cut - 1]['app']}")
                 error = None
                 continue
-            emit("done", uid, {}, t_end)
-            log(f"     done {(time.time() - t_end) * 1000:.0f} ms after you stopped talking")
-            return
-        emit("error", uid, {"message": error or "Gave up after 3 tries"})
+            return self.finish(uid, t_end)
+        self.fail(uid, error or "Gave up after 3 tries")
 
+    def check_folder_name(self, uid, desc, snap, t_end):
+        """Finder refuses duplicate names with an alert: dismiss it, cancel the rename, undo the folder."""
+        ok_btn = next((i for i in snap["items"] if i["kind"] == "element" and i["role"] == "button"
+                       and i["label"] == "OK"), None)
+        if ok_btn is None:
+            return self.finish(uid, t_end)
+        name = desc.split("“")[1].split("”")[0]
+        log(f"     name “{name}” is taken: cleaning up")
+        self.execute(uid, [{"op": "press", "target": ok_btn["id"]}, {"op": "keys", "keys": "esc"},
+                           {"op": "keys", "keys": "cmd+z"}], snap["snapshot_id"])
+        self.fail(uid, f"A folder named “{name}” already exists here")
+
+    # ---------------------------------------------------------------- questions and confirmations
     def ask_question(self, uid, say, options, resume):
         self.awaiting = {"say": say, "options": options, "resume": resume, "t": time.time()}
         log(f"     asks: {say!r} {options}")
         emit("ask", uid, {"say": say, "options": options})
 
+    def confirm(self, uid, say, acts, snap, cancel=None):
+        say = tidy_say(say)
+        self.pending = {"uid": uid, "say": say, "actions": acts, "sid": snap["snapshot_id"], "t": time.time(),
+                        "cancel": cancel}
+        log(f"     needs confirmation: {say!r} {json.dumps(acts, ensure_ascii=False)}")
+        emit("confirm", uid, {"say": (say or "Do it").rstrip("?") + "?"})
+
+    # ---------------------------------------------------------------- texting
     def text_flow(self, uid, rest, snap, t_end, chosen=None, message=None):
         """text <name> <message> in Messages, with the recipient verified from the window title."""
         if snap["app"]["name"] != "Messages":
             ok, err, snap = self.execute(uid, [{"op": "open_app", "app": "Messages"}], snap["snapshot_id"])
             if not ok:
-                return emit("error", uid, {"message": err})
+                return self.fail(uid, err)
         convos = conversations(snap)
         if chosen is None:
             words = re.sub(r"\b(saying|that says|that)\b", "|", rest).split("|")[0].split()
@@ -416,76 +662,83 @@ class Brain:
                     matches, name_len = m, k
                     break
             if not matches:
-                return emit("error", uid, {"message": f"No recent conversation with “{words[0].title() if words else '?'}”"})
+                return self.fail(uid, f"No recent conversation with “{words[0].title() if words else '?'}”")
             msg = re.sub(r"^(saying|that says|that)\s+", "", " ".join(rest.split()[name_len:])).strip()
             if len(matches) > 1:
                 names = [n for n, _ in matches[:4]]
                 return self.ask_question(uid, f"Which {' '.join(words[:name_len]).title()}?", names,
                                          lambda ans, uid2, t2: self._text_pick(uid2, ans, names, rest, msg, t2))
             chosen, message = matches[0][0], msg
-        # open the conversation (re-find it in the current snapshot) and verify the window title
         item = next((i for n, i in conversations(snap) if n == chosen), None)
         if item is None:
-            return emit("error", uid, {"message": f"Can't find the conversation with {chosen}"})
+            return self.fail(uid, f"Can't find the conversation with {chosen}")
         ok, err, snap = self.execute(uid, [{"op": "press", "target": item["id"]}], snap["snapshot_id"])
         if not ok:
-            return emit("error", uid, {"message": err})
-        if (snap.get("window") or "").strip() != chosen:
-            return emit("error", uid, {"message": f"Opened “{snap.get('window')}”, not {chosen}; nothing sent"})
+            return self.fail(uid, err)
+        title = (snap.get("window") or "").strip()
+        if not (title == chosen or title.startswith(chosen + " ") or chosen.startswith(title + " ")):
+            return self.fail(uid, f"Opened “{title}”, not {chosen}; nothing sent")
         if not message:
-            return self.ask_question(uid, f"What should I send to {chosen}?", [],
+            return self.ask_question(uid, f"What should I send to {title}?", [],
                                      lambda ans, uid2, t2: self.text_flow(uid2, rest, self.ui.snapshot(), t2,
                                                                           chosen=chosen, message=ans.strip()))
         field = next((i for i in snap["items"] if i["kind"] == "element" and i["role"] == "textfield"
                       and i["label"] == "Message"), None)
         if field is None:
-            return emit("error", uid, {"message": "Can't find the message field"})
+            return self.fail(uid, "Can't find the message field")
         ok, err, snap = self.execute(uid, [{"op": "type", "text": message, "target": field["id"]}], snap["snapshot_id"])
         if not ok:
-            return emit("error", uid, {"message": err})
+            return self.fail(uid, err)
         field = next((i for i in snap["items"] if i["kind"] == "element" and i["role"] == "textfield"
                       and i["label"] == "Message"), field)
-        # cancel = focus the message field first, then clear it (never ⌘A+Delete on the sidebar)
-        self.ask(uid, f"Send “{message}” to {snap.get('window')}", [{"op": "keys", "keys": "return"}], snap,
-                 cancel=[{"op": "press", "target": field["id"]}, {"op": "keys", "keys": "cmd+a"},
-                         {"op": "keys", "keys": "delete"}])
+        send = [{"op": "keys", "keys": "return"}]
+        cancel = [{"op": "press", "target": field["id"]}, {"op": "keys", "keys": "cmd+a"}, {"op": "keys", "keys": "delete"}]
+        if self.gate(uid, "send", f"Send “{message}” to {title}", send, snap, cancel):
+            return
+        ok, err, _ = self.execute(uid, send, snap["snapshot_id"])
+        return self.finish(uid, t_end, f"Sent to {title}") if ok else self.fail(uid, err)
 
     def _text_pick(self, uid, answer, names, rest, msg, t_end):
         i = pick_option(norm(answer), names)
         if i is None:
-            return emit("error", uid, {"message": f"Didn't catch which one (heard “{answer}”)"})
+            return self.fail(uid, f"Didn't catch which one (heard “{answer}”)")
         self.text_flow(uid, rest, self.ui.snapshot(), t_end, chosen=names[i], message=msg)
-
-    def ask(self, uid, say, acts, snap, cancel=None):
-        say = tidy_say(say)
-        self.pending = {"uid": uid, "say": say, "actions": acts, "sid": snap["snapshot_id"], "t": time.time(),
-                        "cancel": cancel}
-        log(f"     needs confirmation: {say!r} {json.dumps(acts, ensure_ascii=False)}")
-        emit("confirm", uid, {"say": (say or "Do it").rstrip("?") + "?"})
-
-
-def worker(q):
-    brain = Brain()
-    while True:
-        u = q.get()
-        try:
-            brain.handle(u)
-        except Exception as e:                          # keep serving
-            log(f"!! {type(e).__name__}: {e}")
-            emit("error", u.get("id"), {"message": f"{type(e).__name__}"})
 
 
 def main():
     q = queue.Queue()
-    threading.Thread(target=worker, args=(q,), daemon=True).start()
+    ready = threading.Event()
+    holder = {}
+
+    def worker():
+        brain = Brain(q)
+        holder["brain"] = brain
+        ready.set()
+        while True:
+            u = q.get()
+            brain.cancel.clear()
+            brain.busy = True
+            try:
+                brain.handle(u)
+            except Exception as e:                      # keep serving
+                log(f"!! {type(e).__name__}: {e}")
+                emit("error", u.get("id"), {"message": type(e).__name__})
+            finally:
+                brain.busy = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    ready.wait()
+    load_settings()                                     # writes defaults on first run
 
     class H(BaseHTTPRequestHandler):
         def do_POST(self):
             try:
-                q.put(json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)))))
-                self.send_response(200)
+                u = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
             except ValueError:
-                self.send_response(400)
+                self.send_response(400); self.end_headers(); return
+            if not holder["brain"].try_stop(u):
+                q.put(u)
+            self.send_response(200)
             self.end_headers()
 
         def do_GET(self):
@@ -494,7 +747,8 @@ def main():
         def log_message(self, *a):
             pass
 
-    print(f"mini brain on http://127.0.0.1:{PORT}  (fast path + Bonsai planner on :8080; Ctrl-C to stop)", flush=True)
+    print(f"mini brain on http://127.0.0.1:{PORT}  (fast path + Bonsai planner on :8080; settings {SETTINGS_PATH})",
+          flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
 
 
