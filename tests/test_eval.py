@@ -10,7 +10,7 @@ import pytest
 
 from brain.contracts import JSON, Action, Event, EventSink, Executor, Plan, Route, UISnapshot, Utterance
 from brain.fixtures import FakeExecutor, FixtureUIProvider, fixture_names, load_fixture
-from eval import run_eval
+from eval import demo_board, run_eval
 from eval.cases import (
     ActionPattern,
     Case,
@@ -23,8 +23,17 @@ from eval.cases import (
     parse_step,
     select_cases,
 )
+from eval.demo_board import big, fmt_ms, render_board
 from eval.e2e import BrainFactory, run_case_e2e
-from eval.report import comparison_text, latency_by_route, percentile, results_json, summarize, summary_text
+from eval.report import (
+    comparison_text,
+    headline,
+    latency_by_route,
+    percentile,
+    results_json,
+    summarize,
+    summary_text,
+)
 from eval.runner import CaseResult, Components, RouterLike, RunConfig, run_case, run_cases
 from eval.scoring import (
     Outcome,
@@ -796,3 +805,74 @@ def test_cli_e2e_mode(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Non
     data = json.loads(written.read_text(encoding="utf-8"))
     assert set(data["modes"]) == {"router", "e2e"} and data["meta"]["modes"] == ["router", "e2e"]
     assert data["modes"]["e2e"]["cases"][1]["runs"][0]["events"] == ["rejected"]
+
+
+# ---------------------------------------------------------------------------
+# W1c: one-line JSON summary, demo board
+# ---------------------------------------------------------------------------
+
+
+def _results_data() -> JSON:
+    router = [_result("PASS", "fastpath", 10.0), _result("FAIL", "planner", 900.0, split="holdout")]
+    e2e = [_result("PASS", "fastpath", 10.0, mode="e2e"), _result("SKIP", "none", 1.0, mode="e2e")]
+    return results_json(
+        {"router": router, "e2e": e2e}, {"timestamp": "2026-11-14T13:00:00", "planner": "stub"}
+    )
+
+
+def test_headline() -> None:
+    head = headline(_results_data(), "r.json")
+    assert head["results"] == "r.json" and head["planner"] == "stub"
+    r, e = head["modes"]["router"], head["modes"]["e2e"]
+    assert (r["pass"], r["total"], r["rate"]) == (1, 2, 0.5)
+    assert r["split"]["holdout"] == {"pass": 0, "ran": 1, "rate": 0.0}
+    assert (e["rate"], e["rate_ran"], e["skip"]) == (0.5, 1.0, 1)  # skips count against `rate`
+    assert e["latency"]["fastpath"]["median_ms"] == 5.0 and "none" not in e["latency"]
+    assert e["latency_label"] == "end of speech -> first action"
+    with pytest.raises(ValueError):
+        headline({"nope": 1})
+
+
+def test_big_digits_and_formatting() -> None:
+    rows = big("85.0%", ascii_only=True)
+    assert len(rows) == 5 and all(set(r) <= {"#", " "} for r in rows)
+    assert "█" in "".join(big("1"))
+    assert fmt_ms(0.42) == "0.4 ms" and fmt_ms(412.0) == "412 ms" and fmt_ms(4210.0) == "4.2 s"
+
+
+def test_render_board() -> None:
+    head = headline(_results_data())
+    board = render_board(head, ascii_only=True)
+    assert "end to end" in board and "1 / 2 commands pass" in board and "(1 skipped)" in board
+    assert "router: 50.0%" in board and "e2e: 50.0%" in board and "fastpath" in board
+    router = render_board(head, "router", color=True)
+    assert "holdout 0/1 (0.0%)" in router and "\x1b[" in router
+    with pytest.raises(ValueError, match="not in results"):
+        render_board({"modes": {"router": head["modes"]["router"]}}, "e2e")
+
+
+def test_demo_board_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert demo_board.main(["--dir", str(tmp_path)]) == 2  # no results yet
+    (tmp_path / "20260101-000000.json").write_text(json.dumps(_results_data()), encoding="utf-8")
+    newest = tmp_path / "20260102-000000.json"
+    newest.write_text(json.dumps(_results_data()), encoding="utf-8")
+    assert demo_board.latest_results(tmp_path) == newest
+    capsys.readouterr()
+    assert demo_board.main(["--dir", str(tmp_path), "--ascii", "--color", "never"]) == 0
+    assert "commands pass" in capsys.readouterr().out
+    assert demo_board.main(["--file", str(newest), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["modes"]["router"]["pass"] == 1
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}", encoding="utf-8")
+    assert demo_board.main(["--file", str(bad)]) == 2
+
+
+def test_cli_json_summary_is_one_stdout_line(capsys: pytest.CaptureFixture[str]) -> None:
+    pytest.importorskip("brain.router")
+    assert run_eval.main(["--no-model", "--no-write", "--only", "ct-stop,fp-new-note", "--json-summary"]) == 0
+    captured = capsys.readouterr()
+    lines = captured.out.strip().splitlines()
+    assert len(lines) == 1
+    summary = json.loads(lines[0])
+    assert summary["modes"]["router"]["pass"] == 2 and "results" not in summary
+    assert "PASS  ct-stop" in captured.err  # human output moved to stderr

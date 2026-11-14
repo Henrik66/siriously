@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import io
 import json
 import platform
 import sys
@@ -38,7 +37,15 @@ from brain.contracts import JSON
 from brain.fixtures import DEFAULT_FIXTURES_DIR, FixtureError, load_apps
 from eval.cases import DEFAULT_CASES, MODES, Case, CaseError, load_cases, select_cases
 from eval.components import ComponentError, PlannerOptions, build_components
-from eval.report import case_line, comparison_text, results_json, summarize, summary_text
+from eval.report import (
+    case_line,
+    comparison_text,
+    headline,
+    results_json,
+    summarize,
+    summary_text,
+    utf8_stdio,
+)
 from eval.runner import CaseResult, Components, RunConfig, run_case, run_cases
 from eval.scoring import Outcome
 
@@ -68,6 +75,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES_DIR, help="fixtures directory")
     p.add_argument("--out", type=Path, default=DEFAULT_RESULTS, help="results directory")
     p.add_argument("--no-write", action="store_true", help="do not write a results JSON file")
+    p.add_argument("--json-summary", action="store_true",
+                   help="stdout = one JSON line of rates + latency; the rest -> stderr")  # fmt: skip
     p.add_argument("--min-pass", type=float, default=None,
                    help="exit 1 if the pass rate over cases that ran is below this (0..1)")  # fmt: skip
     return p.parse_args(argv)
@@ -77,7 +86,7 @@ def _split(values: Sequence[str]) -> list[str]:
     return [v.strip() for raw in values for v in raw.split(",") if v.strip()]
 
 
-def write_results(by_mode: dict[str, list[CaseResult]], meta: JSON, out_dir: Path) -> Path:
+def write_results(data: JSON, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = out_dir / f"{stamp}.json"
@@ -85,9 +94,7 @@ def write_results(by_mode: dict[str, list[CaseResult]], meta: JSON, out_dir: Pat
     while path.exists():
         n += 1
         path = out_dir / f"{stamp}-{n}.json"
-    path.write_text(
-        json.dumps(results_json(by_mode, meta), indent=1, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    path.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
 
 
@@ -109,13 +116,6 @@ def _meta(args: argparse.Namespace, planner_desc: str, n_cases: int) -> JSON:
         "python": platform.python_version(),
         "platform": platform.platform(),
     }
-
-
-def _utf8_stdout() -> None:
-    """Piped output on Windows defaults to cp1252, which mangles menu glyphs (›, …)."""
-    for stream in (sys.stdout, sys.stderr):
-        if isinstance(stream, io.TextIOWrapper) and (stream.encoding or "").lower() != "utf-8":
-            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def _modes(args: argparse.Namespace) -> list[str]:
@@ -156,7 +156,8 @@ def _setup(args: argparse.Namespace) -> tuple[list[Case], Components, str]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    _utf8_stdout()
+    utf8_stdio()
+    say = sys.stderr if args.json_summary else sys.stdout  # keep stdout = one JSON line
     try:
         cases, comps, planner_desc = _setup(args)
         cfg = RunConfig(fixtures_dir=args.fixtures, max_bursts=args.bursts, verbose=args.verbose)
@@ -167,18 +168,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     by_mode: dict[str, list[CaseResult]] = {}
     for mode, run_one in runners.items():
         mode_cases = [c for c in cases if mode in c.modes]
-        print(f"\n== {mode}: {len(mode_cases)} cases (split {args.split}), planner: {planner_desc}")
+        print(f"\n== {mode}: {len(mode_cases)} cases (split {args.split}), planner: {planner_desc}", file=say)
         by_mode[mode] = run_cases(
             mode_cases,
             run_one,
             mode=mode,
             repeat=args.repeat,
-            on_result=lambda r: print(case_line(r, args.verbose), flush=True),
+            on_result=lambda r: print(case_line(r, args.verbose), file=say, flush=True),
         )
-        print(summary_text(by_mode[mode], planner_desc, mode))
-    print(comparison_text(by_mode))
-    if not args.no_write:
-        print(f"results: {write_results(by_mode, _meta(args, planner_desc, len(cases)), args.out)}")
+        print(summary_text(by_mode[mode], planner_desc, mode), file=say)
+    print(comparison_text(by_mode), file=say)
+    data = results_json(by_mode, _meta(args, planner_desc, len(cases)))
+    path = None if args.no_write else write_results(data, args.out)
+    if path is not None:
+        print(f"results: {path}", file=say)
+    if args.json_summary:
+        print(json.dumps(headline(data, None if path is None else str(path)), separators=(",", ":")))
     if args.min_pass is not None and any(summarize(r).rate_run < args.min_pass for r in by_mode.values()):
         return 1
     return 0

@@ -8,8 +8,10 @@ Latency per route means different things per mode:
 
 from __future__ import annotations
 
+import io
 import math
 import statistics
+import sys
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -247,3 +249,57 @@ def mode_json(results: Sequence[CaseResult]) -> JSON:
 
 def results_json(by_mode: Mapping[str, Sequence[CaseResult]], meta: JSON) -> JSON:
     return {"meta": meta, "modes": {mode: mode_json(results) for mode, results in by_mode.items()}}
+
+
+# ---------------------------------------------------------------------------
+# Headline (one-line summary, demo board)
+# ---------------------------------------------------------------------------
+
+
+def _rate(passed: int, n: int) -> float | None:
+    return round(passed / n, 4) if n else None
+
+
+def _split_headline(d: Mapping[str, object]) -> JSON:
+    passed, ran = int(str(d["pass"])), int(str(d["total"])) - int(str(d["skip"]))
+    return {"pass": passed, "ran": ran, "rate": _rate(passed, ran)}
+
+
+def headline(data: Mapping[str, object], results_path: str | None = None) -> JSON:
+    """Compact numbers from a results JSON (``results_json`` output, or a file it wrote).
+
+    ``rate`` counts skipped cases as not passed (the conservative number for a slide); ``rate_ran``
+    excludes them. Latency is per route: routing decision (router) / end of speech -> first action (e2e).
+    """
+    meta = data.get("meta")
+    modes = data.get("modes")
+    if not isinstance(meta, dict) or not isinstance(modes, dict):
+        raise ValueError("not an eval results file (missing meta/modes)")
+    out: JSON = {"timestamp": meta.get("timestamp"), "planner": meta.get("planner"), "modes": {}}
+    if results_path is not None:
+        out["results"] = results_path
+    for mode, body in modes.items():
+        summary, latency = body["summary"], body.get("latency_by_route", {})
+        passed, total, skip = int(summary["pass"]), int(summary["total"]), int(summary["skip"])
+        out["modes"][mode] = {
+            "pass": passed,
+            "total": total,
+            "skip": skip,
+            "error": int(summary.get("error", 0)),
+            "rate": _rate(passed, total),
+            "rate_ran": _rate(passed, total - skip),
+            "split": {k: _split_headline(v) for k, v in summary.get("by_split", {}).items()},
+            "latency_label": LATENCY_LABEL.get(mode, mode),
+            "latency": {
+                route: {"median_ms": st["median_ms"], "p90_ms": st["p90_ms"], "n": st["n"]}
+                for route, st in latency.items()
+            },
+        }
+    return out
+
+
+def utf8_stdio() -> None:
+    """Piped output on Windows defaults to cp1252, which mangles menu glyphs (›, …) and block digits."""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper) and (stream.encoding or "").lower() != "utf-8":
+            stream.reconfigure(encoding="utf-8", errors="replace")
