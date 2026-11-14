@@ -123,6 +123,16 @@ Teammate ships `FixtureUIProvider` (loads `eval/fixtures/*.json`) and `FakeExecu
 ### 4.6 Events (brain → overlay): `WS ws://127.0.0.1:8765/events`
 `{"type": "heard|rejected|route|plan|action|done|error|confirm", "utterance_id": "...", "data": {...}, "ms_since_speech_end": 412}`
 
+**Overlay (`mac/overlay`, implemented) reads these `data` fields.** Anything else is ignored, and all fields are optional:
+- `heard` / `rejected`: `text`, `score`. The speech daemon already sends these to the overlay itself (UDP :8766), so the brain doesn't need to.
+- `route`: `route` (`"planner"` shows "Thinking"; `"none"` shows "No matching action").
+- `plan`: `say` (short, user-facing, e.g. `New note “groceries”`), `steps`.
+- `action`: `index`, `of`, `action` (the Action dict), and `label` (the target's label, for press/menu) or `desc` (your own wording).
+- `done`: optional `say`, plus top-level `ms_since_speech_end` (shown as "Done · 1.2 s").
+- `error`: `message`. `confirm`: `say` (shown with "Say yes or no").
+
+The overlay connects to `ws://127.0.0.1:8765/events` and retries every 3 s. It also accepts the same JSON as UDP datagrams on 127.0.0.1:8766.
+
 ## 5. Functional requirements (teammate)
 
 ### 5.1 Router (R1)

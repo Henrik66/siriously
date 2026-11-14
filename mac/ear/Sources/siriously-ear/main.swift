@@ -322,6 +322,34 @@ func glob(_ dir: String, prefix: String) -> [String] {
     return fs.filter { $0.hasPrefix(prefix) && $0.hasSuffix(".wav") }.sorted().map { "\(dir)/\($0)" }
 }
 
+// MARK: - overlay events (UDP, fire-and-forget; PRD §4.6 event shape)
+
+final class OverlayEvents {
+    private let fd = socket(AF_INET, SOCK_DGRAM, 0)
+    private var addr = sockaddr_in()
+
+    init(port: UInt16 = 8766) {
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    }
+
+    func send(_ type: String, id: String? = nil, data: [String: Any] = [:], msSinceEnd: Int? = nil) {
+        var ev: [String: Any] = ["type": type, "data": data]
+        if let id { ev["utterance_id"] = id }
+        if let msSinceEnd { ev["ms_since_speech_end"] = msSinceEnd }
+        guard let d = try? JSONSerialization.data(withJSONObject: ev) else { return }
+        d.withUnsafeBytes { buf in
+            withUnsafePointer(to: &addr) { p in
+                p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    _ = sendto(fd, buf.baseAddress, d.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+    }
+}
+
 // MARK: - brain client
 
 struct Speaker: Codable { let verified: Bool; let score: Float?; let name: String }
@@ -455,7 +483,8 @@ func runDaemon(_ ear: Ear) async throws {
     let seg = Segmenter(silenceMs: opt.silenceMs)
     let mic = Mic(seg: seg)
     let (stream, cont) = AsyncStream<([Float], Date)>.makeStream()
-    seg.onStart = { log("… speech") }
+    let overlay = OverlayEvents()
+    seg.onStart = { log("… speech"); overlay.send("listening") }
     seg.onUtterance = { clip, end in cont.yield((clip, end)) }
     try mic.start(name: opt.mic)
     log("brain: \(opt.brain)   end-of-speech silence: \(opt.silenceMs) ms   Ctrl-C to stop")
@@ -475,6 +504,7 @@ func runDaemon(_ ear: Ear) async throws {
         let secs = Double(clip.count) / Double(sampleRate)
         if opt.saveAudio { try? writeWav(clip, to: "\(stateDir)/utterances/\(id).wav") }
         if text.isEmpty {
+            overlay.send("dropped", id: id)
             log(String(format: "[%@] %.1fs  (no words, dropped)  %d ms", id, secs, sttMs)); continue
         }
         let score = emb.flatMap { vp?.score($0) }
@@ -483,6 +513,10 @@ func runDaemon(_ ear: Ear) async throws {
         let u = Utterance(id: id, text: text, tSpeechEnd: end.timeIntervalSince1970, sttMs: sttMs,
                           speaker: Speaker(verified: verified, score: score, name: verified ? (vp?.name ?? "anyone") : "unknown"),
                           audioS: secs, lockMs: lockMs)
+        var evData: [String: Any] = ["text": text, "verified": verified]
+        if let score { evData["score"] = Double(score) }
+        overlay.send(verified ? "heard" : "rejected", id: id, data: evData,
+                     msSinceEnd: Int(Date().timeIntervalSince(end) * 1000))
         let status = await post(u, to: opt.brain)
         log(String(format: "[%@] %.1fs  \"%@\"  stt %d ms  %@  e2e %d ms  %@", id, secs, text, sttMs,
                    score.map { String(format: "voice %+.2f %@", $0, verified ? "✓" : "✗ REJECTED") } ?? (vp == nil ? "lock off" : "voice ? ✗"),
