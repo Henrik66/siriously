@@ -5,6 +5,7 @@
 #   BONSAI=upstream ./start_all.sh # stock Homebrew llama.cpp + Q2_0 on :8080
 #   BONSAI=mlx ./start_all.sh      # mlx-vlm server on :8081
 #   SIZE=2B|4B|9B  STT=small.en|base.en|large-v3-v20240930_626MB  ./start_all.sh
+#   STT=none ./start_all.sh       # Bonsai only (the speech daemon mac/ear does STT in-process)
 #   ./start_all.sh stop            # stop everything this script started
 #   ./start_all.sh status          # health-check only
 #
@@ -59,7 +60,9 @@ status() {
   local ok=0
   health bonsai "http://127.0.0.1:8080/health" && echo "  ✅ bonsai (llama-server) :8080" || \
   { health bonsai "http://127.0.0.1:8081/v1/models" && echo "  ✅ bonsai (mlx-vlm) :8081" || { echo "  ❌ bonsai server not responding"; ok=1; }; }
-  health argmax "http://127.0.0.1:$STT_PORT/health" && echo "  ✅ argmax STT :$STT_PORT" || { echo "  ❌ argmax STT not responding"; ok=1; }
+  if [ "$STT" != none ]; then
+    health argmax "http://127.0.0.1:$STT_PORT/health" && echo "  ✅ argmax STT :$STT_PORT" || { echo "  ❌ argmax STT not responding"; ok=1; }
+  fi
   return $ok
 }
 
@@ -71,7 +74,8 @@ case "${1:-start}" in
 esac
 
 PORT=$(bonsai_port)
-for p in "$PORT" "$STT_PORT"; do
+PORTS="$PORT"; [ "$STT" != none ] && PORTS="$PORT $STT_PORT"
+for p in $PORTS; do
   if lsof -ti TCP:"$p" -sTCP:LISTEN >/dev/null; then echo "Port $p is already in use. Run '$0 stop' first."; exit 1; fi
 done
 
@@ -91,17 +95,19 @@ case "$BONSAI" in
   *) echo "BONSAI must be fork|upstream|mlx"; exit 2 ;;
 esac
 
-echo "== Argmax STT server ($STT) on :$STT_PORT"
-STT_DIR="$ARGMAX_MODELS/models/argmaxinc/whisperkit-coreml/openai_whisper-$STT"
-[ -d "$STT_DIR" ] || { echo "missing $STT_DIR"; exit 1; }
-start_bg argmax whisperkit-cli serve --model-path "$STT_DIR" --download-tokenizer-path "$ARGMAX_MODELS/tokenizers" \
-  --host 127.0.0.1 --port "$STT_PORT"
+if [ "$STT" != none ]; then
+  echo "== Argmax STT server ($STT) on :$STT_PORT"
+  STT_DIR="$ARGMAX_MODELS/models/argmaxinc/whisperkit-coreml/openai_whisper-$STT"
+  [ -d "$STT_DIR" ] || { echo "missing $STT_DIR"; exit 1; }
+  start_bg argmax whisperkit-cli serve --model-path "$STT_DIR" --download-tokenizer-path "$ARGMAX_MODELS/tokenizers" \
+    --host 127.0.0.1 --port "$STT_PORT"
+fi
 
 echo "== Health checks"
 rc=0
 if [ "$BONSAI" = mlx ]; then wait_healthy bonsai "http://127.0.0.1:8081/v1/models" 180 || rc=1
 else wait_healthy bonsai "http://127.0.0.1:8080/health" 180 || rc=1; fi
-wait_healthy argmax "http://127.0.0.1:$STT_PORT/health" 180 || rc=1
+[ "$STT" != none ] && { wait_healthy argmax "http://127.0.0.1:$STT_PORT/health" 180 || rc=1; }
 
 echo
 echo "Bonsai  : http://127.0.0.1:$PORT/v1   (OpenAI chat; send sampling + thinking flags per request)"

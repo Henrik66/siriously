@@ -316,7 +316,7 @@ final class Controller {
                 hud.setDetail("Thinking", symbol: "ellipsis", motion: .variable)
             case "none":
                 busyUntil = .distantPast
-                hud.setDetail("No matching action", symbol: "minus", hideAfter: 1.6)
+                hud.setDetail(str(data["say"]) ?? "No matching action", symbol: "minus", hideAfter: 2.2)
             default: break
             }
         case "plan":
