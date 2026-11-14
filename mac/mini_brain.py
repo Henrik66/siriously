@@ -126,6 +126,13 @@ def fast_path(t, snap, apps):
         if title:
             acts.append({"op": "type", "text": title})
         return (f"New note “{title}”" if title else "New note"), acts
+    if m := re.match(r"^(?:make |create )?(?:a )?new folder(?: called| named)?\s*(.*)$", t):
+        name = m.group(1).strip()
+        acts = [] if snap["app"]["name"] == "Finder" else [{"op": "open_app", "app": "Finder"}]
+        acts += [{"op": "keys", "keys": "cmd+shift+n"}]
+        if name:
+            acts += [{"op": "type", "text": name}, {"op": "keys", "keys": "return"}]
+        return (f"New folder “{name}”" if name else "New folder"), acts
     if m := re.match(r"^(?:type|write|dictate)\s+(.+)$", t):
         return "Type", [{"op": "type", "text": m.group(1)}]
     els = {i["label"].lower(): i for i in snap["items"] if i["kind"] == "element" and i["label"]}
