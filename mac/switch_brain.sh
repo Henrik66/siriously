@@ -14,7 +14,7 @@ case "$1" in
     stop; nohup uv run --offline siriously-brain --mac >> logs/brain.log 2>&1 &
     for i in {1..30}; do sleep 1; curl -s --noproxy '*' -m 1 127.0.0.1:8765/health >/dev/null && break; done
     curl -s --noproxy '*' 127.0.0.1:8765/health; echo
-    echo "NOTE: this brain has no wake word yet: every sentence in your voice is treated as a command." ;;
+    echo "Wake word, follow-ups and menu permissions: on (brain/addressing.py)." ;;
   status)
     pgrep -fl "mac/mini_brain.py|siriously-brain" | grep -v "uv run" || echo "no brain running"
     curl -s --noproxy '*' -m 1 127.0.0.1:8765/health; echo ;;

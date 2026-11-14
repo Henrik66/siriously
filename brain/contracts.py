@@ -54,16 +54,22 @@ class Speaker:
     verified: bool
     score: float = 0.0
     name: str | None = None
+    threshold: float | None = None  # voice-lock accept threshold: a short "yes" may pass slightly below it
 
     def to_dict(self) -> JSON:
-        return {"verified": self.verified, "score": self.score, "name": self.name}
+        d: JSON = {"verified": self.verified, "score": self.score, "name": self.name}
+        if self.threshold is not None:
+            d["threshold"] = self.threshold
+        return d
 
     @classmethod
     def from_dict(cls, d: JSON) -> Speaker:
+        thr = d.get("threshold")
         return cls(
             verified=bool(_req(d, "verified", bool, "speaker")),
-            score=float(d.get("score", 0.0)),
+            score=float(d.get("score") or 0.0),
             name=d.get("name"),
+            threshold=float(thr) if thr is not None else None,
         )
 
 
@@ -74,15 +80,19 @@ class Utterance:
     t_speech_end: float = 0.0
     stt_ms: int = 0
     speaker: Speaker = field(default_factory=lambda: Speaker(verified=True, score=1.0))
+    audio_s: float = 0.0  # clip length; t_speech_end - audio_s ~ when you started talking (follow-up window)
 
     def to_dict(self) -> JSON:
-        return {
+        d: JSON = {
             "id": self.id,
             "text": self.text,
             "t_speech_end": self.t_speech_end,
             "stt_ms": self.stt_ms,
             "speaker": self.speaker.to_dict(),
         }
+        if self.audio_s:
+            d["audio_s"] = self.audio_s
+        return d
 
     @classmethod
     def from_dict(cls, d: JSON) -> Utterance:
@@ -95,6 +105,7 @@ class Utterance:
             t_speech_end=float(d.get("t_speech_end", 0.0)),
             stt_ms=int(d.get("stt_ms", 0)),
             speaker=Speaker.from_dict(_req(d, "speaker", dict, "utterance")),
+            audio_s=float(d.get("audio_s") or 0.0),
         )
 
 
@@ -541,6 +552,7 @@ SPEAKER_SCHEMA: JSON = {
         "verified": {"type": "boolean"},
         "score": {"type": "number"},
         "name": {"type": ["string", "null"]},
+        "threshold": {"type": ["number", "null"]},
     },
 }
 
@@ -557,6 +569,7 @@ UTTERANCE_SCHEMA: JSON = {
         "t_speech_end": {"type": "number"},
         "stt_ms": {"type": "integer"},
         "speaker": SPEAKER_SCHEMA,
+        "audio_s": {"type": "number"},
     },
 }
 

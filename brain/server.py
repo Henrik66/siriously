@@ -779,9 +779,12 @@ def build_runtime(
     """
     provider, executor = make_io(fixture, mac)
     try:
+        from brain.addressing import Prefs
         from brain.pipeline import build_brain
 
-        brain = build_brain(provider, executor, sink, settings=settings, use_model=not no_model)
+        # On the Mac: wake word, follow-ups and menu-bar permissions (~/.siriously/settings.json).
+        prefs = Prefs() if mac else None
+        brain = build_brain(provider, executor, sink, settings=settings, use_model=not no_model, prefs=prefs)
     except ImportError as exc:
         raise SetupError(f"brain pipeline is unavailable: {exc}") from exc
     if not no_model and warmup != "off":

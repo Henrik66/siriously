@@ -17,7 +17,7 @@ import os
 import sys
 from typing import Any
 
-from brain.contracts import Action, ActionResult, UISnapshot
+from brain.contracts import Action, ActionResult, UIProvider, UISnapshot
 
 _MAC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mac")
 if _MAC_DIR not in sys.path:
@@ -43,8 +43,9 @@ class MacUIProvider:
 class MacExecutor:
     """Runs one Action against the snapshot it was planned on; returns the post-action snapshot."""
 
-    def __init__(self, provider: MacUIProvider | None = None) -> None:
-        self.provider = provider or MacUIProvider()
+    def __init__(self, provider: UIProvider | None = None) -> None:
+        # Must share the provider's element maps: ids are resolved against its snapshots.
+        self.provider = provider if isinstance(provider, MacUIProvider) else MacUIProvider()
         self.raw = _executor.MacExecutor(self.provider.raw)
 
     def run(self, snapshot_id: str, action: Action) -> ActionResult:

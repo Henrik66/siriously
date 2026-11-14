@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol, cast
 
+from brain.addressing import FollowUp, Prefs, sounds_like_command, strip_wake, verdict
 from brain.choice import parse_choice
 from brain.config import Settings
 from brain.contracts import (
@@ -212,6 +213,7 @@ class Brain:
         flows: FlowStore,
         sink: EventSink,
         settings: Settings | None = None,
+        prefs: Prefs | None = None,
     ) -> None:
         self._provider = provider
         self._executor = executor
@@ -229,6 +231,10 @@ class Brain:
         self._pending: _Pending | None = None
         self._ask: _PendingAsk | None = None
         self._last: tuple[tuple[FlowStep, ...], str] | None = None
+        # Wake word, follow-up window and per-category permissions (brain.addressing). None = every verified
+        # utterance is a command and brain.safety alone decides confirmations (dev, eval, tests).
+        self._prefs = prefs
+        self._follow = FollowUp()
 
     # ------------------------------------------------------------------ public
 
@@ -266,7 +272,12 @@ class Brain:
         try:
             gen = self._stop_gen  # captured before waiting on the utterance lock
             received = time.monotonic() if received_at is None else received_at
-            if not utt.speaker.verified:
+            if self._prefs is not None:
+                addressed = self._address(utt)
+                if isinstance(addressed, Route):
+                    return addressed
+                utt = addressed
+            elif not utt.speaker.verified:
                 self._emit("rejected", utt, {"text": utt.text, "score": utt.speaker.score})
                 return Route(kind="rejected", reason="unverified speaker")
             word = _control_word(utt.text)
@@ -277,9 +288,60 @@ class Brain:
         except Exception as exc:
             return self._fail(utt, f"{type(exc).__name__}: {exc}")
 
+    # -------------------------------------------------------------- addressing
+
+    _SHORT_REPLY_SLACK = 0.5  # a short "yes"/"stop" may score this much below the voice-lock threshold
+
+    def _address(self, utt: Utterance) -> Utterance | Route:
+        """Wake word / follow-up / voice lock (brain.addressing). Returns the utterance without the wake
+        word, or a Route for speech that is not for us (silently ignored: no events, no overlay)."""
+        assert self._prefs is not None
+        prefs = self._prefs
+        woke, body = strip_wake(utt.text, prefs.wake_rx())
+        active = self._pending is not None or self._ask is not None
+        busy = self._lock.locked()
+        word = _control_word(body)
+        short = len(body.split()) <= 4
+        verified = utt.speaker.verified
+        thr = utt.speaker.threshold
+        if not verified and short and (active or busy) and thr is not None:
+            verified = utt.speaker.score >= thr - self._SHORT_REPLY_SLACK
+        if not verified:
+            if woke or not prefs.wake_required:
+                self._emit("rejected", utt, {"text": body or utt.text, "score": utt.speaker.score})
+            logger.info("not your voice (score %.2f): %r", utt.speaker.score, utt.text)
+            return Route(kind="rejected", reason="unverified speaker")
+        following = self._follow.open_for(utt.t_speech_end, utt.audio_s, prefs.follow_up_s)
+        addressed = (
+            woke
+            or not prefs.wake_required
+            or active
+            or (word in ("stop", "cancel", "no") and busy)
+            or (following and (word is not None or sounds_like_command(body)))
+        )
+        if not addressed:
+            logger.info("not addressed%s: %r", " (not a command)" if following else "", utt.text)
+            return Route(kind="none", reason="not addressed")
+        if woke and not body:  # just "Siriously": listen for the follow-up
+            self._follow.touch()
+            self._emit("heard", utt, {"text": "Listening…", **self._follow_up_data()})
+            return Route(kind="none", reason="wake word only")
+        self._follow.touch()
+        return replace(utt, text=body, speaker=replace(utt.speaker, verified=True))
+
+    def _follow_up_data(self) -> JSON:
+        """Tell the overlay how long follow-ups work without the wake word (it drains a line)."""
+        if self._prefs is None or not self._prefs.wake_required:
+            return {}
+        return {"follow_up_s": self._prefs.follow_up_s}
+
     # ---------------------------------------------------------------- plumbing
 
     def _emit(self, type_: EventType, utt: Utterance, data: JSON) -> None:
+        if self._prefs is not None and type_ in ("done", "error", "confirm"):
+            self._follow.touch()  # the follow-up window starts when the work ends
+            if type_ != "confirm":
+                data = {**data, **self._follow_up_data()}
         ms = int((time.time() - utt.t_speech_end) * 1000) if utt.t_speech_end > 0 else 0
         self._sink.emit(Event(type=type_, utterance_id=utt.id, data=data, ms_since_speech_end=ms))
 
@@ -444,6 +506,17 @@ class Brain:
             self._emit("error", run.utt, {"message": f"timeout after {limit:g}s"})
             return "failed"
         return None
+
+    def _needs_confirm(self, run: _Run, plan: Plan, snap: UISnapshot) -> str | None:
+        """Why ``plan`` must wait for "yes" (None: run it). "" means blocked by a setting: the error is
+        already emitted. With Prefs, the menu bar's per-category allow/ask/block decides."""
+        if self._prefs is None:
+            return confirm_reason(plan, snap)
+        v = verdict(plan, snap, run.text, self._prefs)
+        if v.mode == "block":
+            self._emit("error", run.utt, {"message": v.reason or "blocked in your settings"})
+            return ""
+        return v.reason if v.mode == "ask" else None
 
     def _ask_confirm(
         self, run: _Run, plan: Plan, reason: str, resume: Callable[[_Run, UISnapshot], Outcome]
@@ -732,7 +805,9 @@ class Brain:
         if (stopped := self._gate(run)) is not None:
             return stopped
         if not confirmed:
-            reason = confirm_reason(plan, base)
+            reason = self._needs_confirm(run, plan, base)
+            if reason == "":
+                return "failed"
             if reason:
                 bundle = base.app.bundle_id
                 return self._ask_confirm(
@@ -939,7 +1014,9 @@ class Brain:
                 return self._flow_fallback(run, flow, i, snap)
             if not (confirmed and i == start):
                 plan = Plan(snap.snapshot_id, (action,))
-                reason = confirm_reason(plan, snap)
+                reason = self._needs_confirm(run, plan, snap)
+                if reason == "":
+                    return "failed"
                 if reason:
                     return self._confirm_flow(run, flow, i, snap, plan, reason)
             result, failure = self._exec_one(run, action, snap.snapshot_id, snap)
@@ -993,6 +1070,7 @@ def build_brain(
     planner: Planner | None = None,
     *,
     use_model: bool = True,
+    prefs: Prefs | None = None,
 ) -> Brain:
     """Wire FastPath, FlowStore, planner and Router around a provider/executor.
 
@@ -1016,4 +1094,4 @@ def build_brain(
             planner = None
     flows = FlowStore(settings.flows_path)
     router = Router(FastPath(apps), flows, planner)
-    return Brain(provider, executor, router, planner, flows, sink, settings)
+    return Brain(provider, executor, router, planner, flows, sink, settings, prefs)

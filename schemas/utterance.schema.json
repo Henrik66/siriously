@@ -38,8 +38,17 @@
             "string",
             "null"
           ]
+        },
+        "threshold": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       }
+    },
+    "audio_s": {
+      "type": "number"
     }
   }
 }
