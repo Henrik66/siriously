@@ -120,3 +120,13 @@ def test_exported_schemas_up_to_date() -> None:
         path = out / f"{name}.schema.json"
         assert path.exists(), f"run: uv run python -m brain.export_schemas ({path} missing)"
         assert json.loads(path.read_text(encoding="utf-8")) == schema, f"{path} stale; re-export"
+
+
+def test_utterance_text_length_capped_in_schema_and_from_dict() -> None:
+    from brain.contracts import UTTERANCE_SCHEMA
+
+    assert UTTERANCE_SCHEMA["properties"]["text"]["maxLength"] == 2000  # type: ignore[index]
+    base = {"id": "u", "speaker": {"verified": True, "score": 1.0}}
+    assert Utterance.from_dict({**base, "text": "x" * 2000}).text == "x" * 2000
+    with pytest.raises(ContractError):
+        Utterance.from_dict({**base, "text": "x" * 2001})

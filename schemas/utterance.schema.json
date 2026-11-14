@@ -12,7 +12,8 @@
       "type": "string"
     },
     "text": {
-      "type": "string"
+      "type": "string",
+      "maxLength": 2000
     },
     "t_speech_end": {
       "type": "number"

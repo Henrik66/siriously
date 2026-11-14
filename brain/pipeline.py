@@ -31,7 +31,7 @@ from brain.contracts import (
     UISnapshot,
     Utterance,
 )
-from brain.control import normalize
+from brain.fastpath import same_app
 from brain.flows import Flow, FlowStep, FlowStore, resolve_step
 from brain.router import is_filler
 from brain.safety import confirm_reason, normalize_keys
@@ -255,7 +255,7 @@ class Brain:
 
     def stop(self) -> None:
         """Abort the current burst between actions and cancel anything queued before now (any thread)."""
-        self._register_stop(time.time())
+        self._register_stop(time.time(), time.monotonic())
 
     def handle(self, utt: Utterance, received_at: float | None = None) -> Route:
         """Process one utterance to completion. Never raises.
@@ -271,7 +271,7 @@ class Brain:
                 return Route(kind="rejected", reason="unverified speaker")
             word = _control_word(utt.text)
             if word == "stop":
-                return self._handle_stop(utt)
+                return self._handle_stop(utt, received)
             with self._lock:
                 return self._handle_locked(utt, word, gen, received)
         except Exception as exc:
@@ -288,19 +288,21 @@ class Brain:
             self._emit("error", utt, {"message": message})
         return Route(kind="none", reason=message)
 
-    def _register_stop(self, wall: float) -> None:
+    def _register_stop(self, wall: float, mono: float) -> None:
+        """Record a stop. ``mono`` is when the stop was *requested* (never later than now), so a stop
+        utterance that sat in the queue does not swallow commands received after the real stop."""
         with self._stop_lock:
             self._stop_gen += 1
             self._stop_wall = max(self._stop_wall, wall)
-            self._stop_mono = time.monotonic()
+            self._stop_mono = max(self._stop_mono, min(mono, time.monotonic()))
             self._pending = None
             self._ask = None
 
-    def _handle_stop(self, utt: Utterance) -> Route:
+    def _handle_stop(self, utt: Utterance, received: float) -> Route:
         """Stop must never wait for the utterance lock."""
         t0 = time.monotonic()
         # utterances spoken before "stop" ended (even if still queued) are cancelled
-        self._register_stop(utt.t_speech_end if utt.t_speech_end > 0 else time.time())
+        self._register_stop(utt.t_speech_end if utt.t_speech_end > 0 else time.time(), received)
         route = Route(kind="control", control="stop", reason="stop")
         self._emit("heard", utt, {"text": utt.text, "speaker": utt.speaker.to_dict()})
         self._emit("route", utt, {"kind": "control", "control": "stop", "reason": "stop", "ms": 0.0})
@@ -343,6 +345,7 @@ class Brain:
         snapshot = self._provider.snapshot()
         if ask is not None and (answered := self._answer_ask(run, ask, snapshot, t0)) is not None:
             return answered
+        t_route = time.monotonic()
         route = self._router.route(utt.text, snapshot)
         data: JSON = {"kind": route.kind, "reason": route.reason, "ms": route.ms}
         if route.control:
@@ -353,6 +356,7 @@ class Brain:
         run.kind = route.kind
         if route.kind in ("planner", "dictation") and route.plan is not None:
             self._add_usage(run)  # the router already called the planner
+            self._record_plan_time(time.monotonic() - t_route)
         if route.kind == "control":
             self._handle_control(run, route, t0)
         elif route.kind == "flow" and route.teach:
@@ -444,9 +448,18 @@ class Brain:
     def _ask_confirm(
         self, run: _Run, plan: Plan, reason: str, resume: Callable[[_Run, UISnapshot], Outcome]
     ) -> Outcome:
-        self._pending = _Pending(
-            run.text, run.kind, resume, done=tuple(run.steps), n_actions=run.n_actions, replans=run.replans
-        )
+        with self._stop_lock:  # a stop() after this run began must not leave a confirm armed
+            if self._stop_gen != run.gen:
+                self._emit("error", run.utt, {"message": "stopped"})
+                return "stopped"
+            self._pending = _Pending(
+                run.text,
+                run.kind,
+                resume,
+                done=tuple(run.steps),
+                n_actions=run.n_actions,
+                replans=run.replans,
+            )
         self._emit("confirm", run.utt, {"plan": plan.to_dict(), "reason": reason})
         return "pending"
 
@@ -474,6 +487,8 @@ class Brain:
                 changed = True
             elif action.op == "press" and self._is_selection(action, snap):
                 pass  # already selected: nothing to change, nothing to retry
+            elif action.op == "open_app" and self._is_frontmost(action.app, result):
+                pass  # already in front: activating it again changes nothing, and that is success
             else:
                 failure = f"{_op_ref(action)} had no effect (UI unchanged)"
         data: JSON = {
@@ -504,6 +519,13 @@ class Brain:
             data["ask"] = list(plan.ask)
             data["labels"] = [it.display if (it := snap.item(i)) else "" for i in plan.ask]
         self._emit("plan", run.utt, data)
+
+    def _is_frontmost(self, app: str | None, result: ActionResult) -> bool:
+        try:
+            front = result.snapshot or self._provider.snapshot()
+        except Exception:
+            return False
+        return bool(app) and same_app(front.app, app or "")
 
     @staticmethod
     def _is_selection(action: Action, snap: UISnapshot | None) -> bool:
@@ -572,11 +594,15 @@ class Brain:
     def _run_rest(self, run: _Run, route: Route, base: UISnapshot) -> Outcome:
         """Second half of "open X and <rest>": route and run ``rest`` in the same utterance run."""
         assert route.plan is not None and route.rest is not None
+        if (stopped := self._gate(run)) is not None:
+            return stopped
         app = next((a.app for a in route.plan.actions if a.op == "open_app" and a.app), "")
         snap = self._await_app(run, base, app)
         if snap is None:
             self._emit("error", run.utt, {"message": f"{app or 'app'} did not come to the front"})
             return "failed"
+        if (stopped := self._gate(run)) is not None:
+            return stopped
         rest = self._route_rest(route.rest, snap)
         data: JSON = {"kind": rest.kind, "reason": rest.reason, "ms": rest.ms, "source": "rest"}
         self._emit("route", run.utt, data)
@@ -593,6 +619,8 @@ class Brain:
                 f"The app {app} was just opened and is now frontmost. Plan only what the user asked for next."
             )
             raw = self._call_planner(run, route.rest, snap, hint=hint)
+            if (stopped := self._gate(run)) is not None:
+                return stopped
             plan = self._drop_repeat(run, raw, snap)
             self._emit_plan(run, plan, "planner", snap)
             if raw.actions and not plan.actions:
@@ -603,11 +631,9 @@ class Brain:
 
     def _await_app(self, run: _Run, base: UISnapshot, app: str) -> UISnapshot | None:
         """Fresh snapshot once ``app`` is frontmost (already frontmost is fine); None if it never is."""
-        want = normalize(app)
 
         def is_app(s: UISnapshot) -> bool:
-            have = normalize(s.app.name)
-            return not want or have == want or want in have or have in want
+            return not app or same_app(s.app, app)
 
         snap = self._provider.snapshot()
         if is_app(snap):
@@ -620,9 +646,14 @@ class Brain:
         planner = self._planner
         if planner is None or run.replans >= self._settings.max_replans:
             return "ok"
+        if (stopped := self._gate(run)) is not None:
+            return stopped
         if not self._time_for_plan(run):
-            return "ok"
+            self._emit("error", run.utt, {"message": f"ran out of time before finishing: {run.text}"})
+            return "failed"
         snap = self._await_navigation(run, base)
+        if (stopped := self._gate(run)) is not None:
+            return stopped
         if snap is None:
             return "ok"
         run.replans += 1
@@ -630,7 +661,10 @@ class Brain:
             f"Continuing the user's request. Already done: {summarize_steps(tuple(run.steps))}. "
             "Plan only the remaining steps; return no actions if nothing is left." + self._already_open(run)
         )
-        plan = self._drop_repeat(run, self._call_planner(run, run.text, snap, hint=hint), snap)
+        raw = self._call_planner(run, run.text, snap, hint=hint)
+        if (stopped := self._gate(run)) is not None:
+            return stopped
+        plan = self._drop_repeat(run, raw, snap)
         self._emit_plan(run, plan, "continue", snap)
         if not plan.actions and plan.ask is None:
             return "ok"  # nothing left
@@ -640,8 +674,19 @@ class Brain:
     # ----------------------------------------------------------------- planner budget
 
     def _expected_plan_s(self) -> float:
-        """Seconds a planner call is expected to take: EMA of measured calls, floored."""
-        return max(self._settings.min_plan_budget_s, self._plan_s_ema * 1.25)
+        """Seconds a planner call is expected to take: 1.25 x EMA, capped at the Bonsai timeout
+        (a call never runs longer), floored at ``min_plan_budget_s``."""
+        s = self._settings
+        return max(s.min_plan_budget_s, min(self._plan_s_ema * 1.25, s.bonsai_timeout_s))
+
+    def _record_plan_time(self, wall_s: float) -> None:
+        """Fold one successful planner call into the EMA. Prefers the planner's own measured ``ms``
+        (excludes lock wait); a failed call (``last_stats["failed"]``) is not counted."""
+        stats = getattr(self._planner, "last_stats", None) or {}
+        if stats.get("failed"):
+            return
+        took = float(stats["ms"]) / 1000.0 if stats.get("ms") else wall_s
+        self._plan_s_ema = took if self._plan_s_ema == 0.0 else 0.7 * self._plan_s_ema + 0.3 * took
 
     def _time_for_plan(self, run: _Run) -> bool:
         """Enough of the utterance budget left for one more planner call (re-plan/continuation)?"""
@@ -659,12 +704,15 @@ class Brain:
         try:
             if _accepts_timeout(planner):
                 plan_fn = cast(Callable[..., Plan], planner.plan)
-                return plan_fn(text, snap, hint=hint, error=error, timeout_s=remaining)
-            return planner.plan(text, snap, hint=hint, error=error)
-        finally:
-            took = time.monotonic() - t
-            self._add_usage(run)
-            self._plan_s_ema = took if self._plan_s_ema == 0.0 else 0.7 * self._plan_s_ema + 0.3 * took
+                plan = plan_fn(text, snap, hint=hint, error=error, timeout_s=remaining)
+            else:
+                plan = planner.plan(text, snap, hint=hint, error=error)
+        except Exception:
+            self._add_usage(run)  # failed calls are billed but never feed the EMA
+            raise
+        self._add_usage(run)
+        self._record_plan_time(time.monotonic() - t)
+        return plan
 
     def _await_navigation(self, run: _Run, base: UISnapshot) -> UISnapshot | None:
         """Poll (~1 s) until the frontmost app/window differs from ``base``; None if it never does."""
@@ -681,6 +729,8 @@ class Brain:
 
     def _run_plan(self, run: _Run, plan: Plan, base: UISnapshot, *, confirmed: bool) -> Outcome:
         descs = tuple(describe(a, base) for a in plan.actions)
+        if (stopped := self._gate(run)) is not None:
+            return stopped
         if not confirmed:
             reason = confirm_reason(plan, base)
             if reason:
@@ -883,6 +933,8 @@ class Brain:
             action = resolve_step(step, snap)
             if action is None and i > 0:
                 snap, action = self._await_resolution(run, step, snap)
+                if (stopped := self._gate(run)) is not None:
+                    return stopped
             if action is None:
                 return self._flow_fallback(run, flow, i, snap)
             if not (confirmed and i == start):
@@ -914,6 +966,8 @@ class Brain:
 
     def _flow_fallback(self, run: _Run, flow: Flow, i: int, snap: UISnapshot) -> Outcome:
         """Step ``i`` no longer resolves: ask the planner for the *remaining* steps only."""
+        if (stopped := self._gate(run)) is not None:
+            return stopped
         if self._planner is None:
             self._emit("error", run.utt, {"message": f"flow {flow.name!r} no longer resolves; no planner"})
             return "failed"
@@ -925,6 +979,8 @@ class Brain:
                 f"Already done, do NOT repeat: {summarize_steps(flow.steps[:i])}."
             )
         plan = self._call_planner(run, flow.utterance or flow.name, snap, hint=hint)
+        if (stopped := self._gate(run)) is not None:
+            return stopped
         self._emit_plan(run, plan, "flow-fallback", snap)
         return self._start_plan(run, plan, snap)
 

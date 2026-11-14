@@ -86,9 +86,12 @@ class Utterance:
 
     @classmethod
     def from_dict(cls, d: JSON) -> Utterance:
+        text = _req(d, "text", str, "utterance")
+        if len(text) > MAX_UTTERANCE_CHARS:
+            raise ContractError(f"utterance.text longer than {MAX_UTTERANCE_CHARS} characters")
         return cls(
             id=_req(d, "id", str, "utterance"),
-            text=_req(d, "text", str, "utterance"),
+            text=text,
             t_speech_end=float(d.get("t_speech_end", 0.0)),
             stt_ms=int(d.get("stt_ms", 0)),
             speaker=Speaker.from_dict(_req(d, "speaker", dict, "utterance")),
@@ -541,6 +544,8 @@ SPEAKER_SCHEMA: JSON = {
     },
 }
 
+MAX_UTTERANCE_CHARS = 2000  # longer "speech" is not a voice command; bounds regex/planner work
+
 UTTERANCE_SCHEMA: JSON = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "Utterance",
@@ -548,7 +553,7 @@ UTTERANCE_SCHEMA: JSON = {
     "required": ["id", "text", "speaker"],
     "properties": {
         "id": {"type": "string"},
-        "text": {"type": "string"},
+        "text": {"type": "string", "maxLength": MAX_UTTERANCE_CHARS},
         "t_speech_end": {"type": "number"},
         "stt_ms": {"type": "integer"},
         "speaker": SPEAKER_SCHEMA,

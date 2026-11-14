@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from rapidfuzz import fuzz, process
 
-from brain.contracts import Action, Direction, Plan, UIItem, UISnapshot
+from brain.contracts import Action, AppInfo, Direction, Plan, UIItem, UISnapshot
 from brain.control import normalize
 from brain.fixtures import normalize_keys
 
@@ -36,6 +36,12 @@ _CREATE = re.compile(
     re.IGNORECASE,
 )
 _NOUN_CUTOFF = 92.0
+# "New <X>" leaves that are not a plain "make an X" action: command/shell/script items run or
+# open things, submenus (New Calendar > iCloud / On My Mac) and "..." items open a chooser/dialog.
+_UNSAFE_NEW = re.compile(r"\b(?:command|shell|script|terminal|run)\b")
+_SUBMENU_LEAVES = frozenset({"new calendar"})
+# a spoken name carrying a time phrase ("lunch at noon") is a scheduling request, not a name
+_TIME_PHRASE = re.compile(r"(?:^|\s)(?:at|on|tomorrow)(?:\s|$)", re.IGNORECASE)
 _SKIP_NOUNS = frozenset({"tab", "window"})
 _DESTROY = re.compile(
     r"^(?:delete|remove|trash|get rid of|throw away|discard)\s+"
@@ -78,6 +84,25 @@ APP_ALIASES: dict[str, str] = {
     "excel": "microsoft excel",
     "powerpoint": "microsoft powerpoint",
 }
+
+
+def canonical_app(name: str) -> str:
+    """Normalized app name with aliases folded ("Code" / "VS Code" -> "visual studio code")."""
+    n = normalize(name)
+    return normalize(APP_ALIASES.get(n, n))
+
+
+def same_app(front: AppInfo, name: str, bundle_id: str = "") -> bool:
+    """Is ``front`` (the frontmost app) the app called ``name`` (optionally with ``bundle_id``)?
+
+    The one matcher for the router and the pipeline. By bundle id when both sides have one, else by
+    alias-folded normalized name; an empty name never matches.
+    """
+    if front.bundle_id and bundle_id:
+        return front.bundle_id.lower() == bundle_id.lower()
+    a, b = canonical_app(front.name), canonical_app(name)
+    return bool(a) and a == b
+
 
 _SCROLL_AMOUNT: dict[str | None, int] = {
     None: 5,
@@ -331,11 +356,17 @@ class FastPath:
         name = m.group(2).strip().strip("\"'“”").rstrip(".!?,;").strip()
         if not noun or not name or noun.split()[-1].rstrip("s") in _SKIP_NOUNS:
             return None
+        if _TIME_PHRASE.search(name):
+            return None  # the planner decides (nothing here can schedule anything)
         singular = noun[:-3] + "y" if noun.endswith("ies") else noun.removesuffix("s")
         scored: list[tuple[float, UIItem]] = []
         for item in snap.menus:
             leaf = normalize(item.name)
             if not item.enabled or not item.path or not leaf.startswith("new "):
+                continue
+            if leaf in _SUBMENU_LEAVES or item.name.rstrip().endswith(("…", "...")):
+                continue
+            if _UNSAFE_NEW.search(normalize(" ".join(item.path))):
                 continue
             kind = leaf[4:]
             if any(w in _SKIP_NOUNS for w in kind.split()) and kind != singular:

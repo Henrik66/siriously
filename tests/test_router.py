@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from brain.contracts import Action, Plan, Route, UISnapshot
@@ -142,3 +144,47 @@ def test_empty_or_filler_is_dropped(text: str) -> None:
 def test_filler_blocklist_is_whole_utterance_only(text: str) -> None:
     r = make(FakePlanner()).route(text, SNAP)
     assert r.reason != "empty or filler utterance"
+
+
+# ---- compound regex: linear, whitespace-normalized
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "open " + "a " * 1000,
+        "open notes" + " " * 1990,
+        "open " + "  and " * 400,
+        "open notes " + "and " * 500,
+        "open the " + "app " * 490,
+        "open " + "x, " * 660,
+    ],
+)
+def test_pathological_input_routes_fast(text: str) -> None:
+    router = Router(FastPath(["Notes", "Slack"]), FakeFlows([]), None)
+    t0 = time.perf_counter()
+    router.route(text[:2000], SNAP)
+    assert (time.perf_counter() - t0) * 1000 < 50
+
+
+def test_compound_tolerates_irregular_whitespace() -> None:
+    router = Router(FastPath(["Notes", "Slack"]), FakeFlows([]), None)
+    r = router.route("  open \t slack   and\nmessage henrik ", SNAP)
+    assert r.reason == "compound" and r.rest == "message henrik"
+
+
+def test_frontmost_check_uses_app_aliases() -> None:
+    from brain.contracts import AppInfo
+
+    code = UISnapshot("s9", AppInfo("Code", "com.microsoft.VSCode"), items=())
+    router = Router(FastPath(["Visual Studio Code", "Notes"]), FakeFlows([]), None)
+    r = router.route("open vs code and new file", code)
+    assert r.reason != "compound"  # already frontmost: no open_app in the plan
+    assert r.plan is None or all(a.op != "open_app" for a in r.plan.actions)
+
+
+def test_compound_of_two_apps_opens_both() -> None:
+    router = Router(FastPath(["Pages", "Numbers", "Notes"]), FakeFlows([]), None)
+    r = router.route("open pages and numbers", SNAP)
+    assert r.plan is not None and r.rest is None
+    assert [(a.op, a.app) for a in r.plan.actions] == [("open_app", "Pages"), ("open_app", "Numbers")]

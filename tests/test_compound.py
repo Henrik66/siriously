@@ -183,3 +183,73 @@ def test_already_frontmost_no_open_app(tmp_path) -> None:  # type: ignore[no-unt
     brain, _, execu, _ = _brain(tmp_path)
     _say(brain, "open finder and create a folder called demo")
     assert [a.op for a in execu.log] == ["menu", "type", "keys"]
+
+
+# ---- app identity (Mac: AX name "Code" vs installed "Visual Studio Code")
+
+
+def _vscode_brain(tmp_path):  # type: ignore[no-untyped-def]
+    from brain.contracts import ActionResult
+
+    code = UISnapshot(
+        "s1",
+        AppInfo("Code", "com.microsoft.VSCode"),
+        items=(UIItem(1, "menu", "menuitem", path=("File", "New File..."), shortcut="cmd+n"),),
+    )
+
+    class Prov:
+        def snapshot(self) -> UISnapshot:
+            return code
+
+        def list_apps(self) -> list[str]:
+            return ["Visual Studio Code", "Notes"]
+
+    class Exec:
+        def __init__(self) -> None:
+            self.log: list[Action] = []
+
+        def run(self, sid: str, a: Action) -> ActionResult:
+            self.log.append(a)
+            return ActionResult(ok=True, changed=False, snapshot=code)
+
+        def undo(self) -> bool:
+            return False
+
+    ex, sink = Exec(), ListSink()
+    brain = build_brain(Prov(), ex, sink, use_model=False)
+    brain._flows = FlowStore(tmp_path / "flows.json")
+    brain._router.flows = brain._flows  # type: ignore[attr-defined]
+    brain.resolve_interval_s = 0.0
+    return brain, ex, sink
+
+
+def test_open_app_of_frontmost_alias_is_success_not_no_effect(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    brain, ex, sink = _vscode_brain(tmp_path)
+    brain.handle(Utterance("u1", "open vs code and new file"))
+    assert [a.op for a in ex.log] == ["menu"]  # no open_app: already frontmost
+    assert not [e for e in sink.events if e.type == "error" and e.data["message"].startswith("open_app")]
+    sink.events.clear()
+    brain.handle(Utterance("u2", "open the visual studio code app"))
+    assert [e.type for e in sink.events if e.type in ("error", "done")] == ["done"]
+
+
+def test_await_app_rejects_empty_names_and_accepts_aliases(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import time as _t
+
+    from brain.pipeline import _Run
+
+    brain, _ex, _sink = _vscode_brain(tmp_path)
+    run = _Run(Utterance("r", "x"), "x", "fastpath", _t.monotonic() + 5, gen=0)
+    base = UISnapshot("b", AppInfo("Notes"), items=())
+    assert brain._await_app(run, base, "Visual Studio Code") is not None
+    assert brain._await_app(run, base, "Notes") is None  # frontmost is "Code", not Notes
+    empty = UISnapshot("e", AppInfo(""), items=())
+    brain._provider.snapshot = lambda: empty  # type: ignore[method-assign]
+    assert brain._await_app(run, base, "Notes") is None
+
+
+def test_two_app_compound_runs_both_open_apps(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    brain, _provider, execu, _sink = _brain(tmp_path)
+    brain.resolve_interval_s = 0.0
+    _say(brain, "open calendar and slack")
+    assert [(a.op, a.app) for a in execu.log] == [("open_app", "Calendar"), ("open_app", "Slack")]

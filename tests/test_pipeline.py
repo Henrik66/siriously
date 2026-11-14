@@ -1199,11 +1199,11 @@ def test_continuation_skipped_when_measured_plan_time_exceeds_budget() -> None:
     planner = SlowTimedPlanner([Plan("s", ())], delay=0.6)
     rig = _fast(Rig(planner=planner, settings=settings))
     rig.plan_route("dark mode", Plan("a", (Action.open_app("System Settings"),)), "planner")
-    rig.brain._plan_s_ema = 0.6  # 1.25 x 0.6 = 0.75 s expected > 0.7 s budget
+    rig.brain._plan_s_ema = 2.0  # still well over the 0.7 s budget after the router call is folded in
     _navigate_to(rig, SETTINGS_SNAP)
     rig.say("dark mode")
     assert planner.calls == []
-    assert rig.types()[-1] == "done"
+    assert rig.types()[-1] == "error"  # not a silent "done": the user is told it ran out of time
 
 
 def test_plan_and_action_events_carry_target_names() -> None:
@@ -1345,3 +1345,194 @@ def test_failure_messages_name_the_target_id() -> None:
     assert _op_ref(Action.menu(110)) == "menu 110"
     assert _op_ref(Action.press(7)) == "press 7"
     assert _op_ref(Action.key("cmd+n")) == "keys"
+
+
+# ---- review fixes: EMA lockout, stop stamping, stop in rest/continuation/confirm
+
+
+class StatsPlanner(FakePlanner):
+    """Planner with a ``last_stats`` like BonsaiPlanner; optionally slow / failing."""
+
+    def __init__(self, plans: list[Plan] | None = None) -> None:
+        super().__init__(plans)
+        self.last_stats: dict[str, float] = {}
+        self.delay = 0.0
+        self.fail = False
+        self.stats_ms = 0.0
+
+    def plan(  # type: ignore[override]
+        self,
+        text: str,
+        snapshot: UISnapshot,
+        *,
+        hint: str | None = None,
+        error: str | None = None,
+        timeout_s: float | None = None,
+    ) -> Plan:
+        time.sleep(self.delay)
+        if self.fail:
+            self.last_stats = {"ms": self.stats_ms, "failed": 1.0}
+            raise RuntimeError("planner down")
+        self.last_stats = {"ms": self.stats_ms} if self.stats_ms else {}
+        return super().plan(text, snapshot, hint=hint, error=error)
+
+
+def _run_for(rig: Rig):  # type: ignore[no-untyped-def]
+    from brain.pipeline import _Run
+
+    return _Run(Utterance("r", "x"), "x", "planner", time.monotonic() + 30, gen=rig.brain._stop_gen)
+
+
+def test_expected_plan_time_is_capped_by_bonsai_timeout() -> None:
+    settings = dataclasses.replace(Settings(), bonsai_timeout_s=6.0, min_plan_budget_s=2.5)
+    brain = Rig(planner=FakePlanner(), settings=settings).brain
+    brain._plan_s_ema = 20.0
+    assert brain._expected_plan_s() == 6.0
+    brain._plan_s_ema = 0.1
+    assert brain._expected_plan_s() == 2.5
+
+
+def test_ema_includes_the_routers_own_planner_call() -> None:
+    planner = StatsPlanner()
+    rig = _fast(Rig(planner=planner))
+    planner.stats_ms = 3000.0
+    planner.last_stats = {"ms": 3000.0}  # what the router's call left behind
+    rig.router.plans["go"] = Route(kind="planner", plan=Plan("a", (Action.type_text("x"),)))
+    rig.say("go")
+    assert rig.brain._plan_s_ema == pytest.approx(3.0)
+
+
+def test_ema_ignores_failed_planner_calls() -> None:
+    planner = StatsPlanner()
+    planner.fail = True
+    planner.stats_ms = 9000.0
+    rig = _fast(Rig(planner=planner))
+    with pytest.raises(RuntimeError):
+        rig.brain._call_planner(_run_for(rig), "x", rig.provider.snap)
+    assert rig.brain._plan_s_ema == 0.0
+
+
+def test_ema_uses_planner_ms_not_lock_wait() -> None:
+    planner = StatsPlanner([Plan("a", ())])
+    planner.delay = 0.3  # wall time includes a lock wait ...
+    planner.stats_ms = 50.0  # ... but the planner measured only 50 ms
+    rig = _fast(Rig(planner=planner))
+    rig.brain._call_planner(_run_for(rig), "x", rig.provider.snap)
+    assert rig.brain._plan_s_ema == pytest.approx(0.05)
+
+
+def test_one_slow_planner_call_does_not_lock_out_later_planning() -> None:
+    settings = dataclasses.replace(Settings(), utterance_timeout_s=8.0, bonsai_timeout_s=6.0)
+    planner = StatsPlanner([Plan("a", ())] * 8)
+    rig = _fast(Rig(planner=planner, settings=settings))
+    rig.brain._plan_s_ema = 5.5  # as left by one cold, slow call
+    planner.stats_ms = 50.0
+    run = _run_for(rig)
+    for _ in range(8):
+        rig.brain._call_planner(run, "x", rig.provider.snap)
+    assert rig.brain._expected_plan_s() < 3.0
+
+
+def test_continuation_budget_skip_emits_error_not_silent_done() -> None:
+    settings = dataclasses.replace(Settings(), utterance_timeout_s=0.7, min_plan_budget_s=0.1)
+    planner = SlowTimedPlanner([Plan("s", ())], delay=0.6)
+    rig = _fast(Rig(planner=planner, settings=settings))
+    rig.plan_route("dark mode", Plan("a", (Action.open_app("System Settings"),)), "planner")
+    rig.brain._plan_s_ema = 2.0
+    _navigate_to(rig, SETTINGS_SNAP)
+    rig.say("dark mode")
+    assert "done" not in rig.types()
+    msg = rig.events("error")[-1].data["message"]
+    assert msg.startswith("ran out of time before finishing:") and "dark mode" in msg
+
+
+def test_queued_stop_utterance_does_not_restamp_stop_time_to_now() -> None:
+    rig = _fast(Rig(planner=FakePlanner()))
+    rig.plan_route("new note", NOTE_PLAN)
+    t_stop = time.monotonic()
+    rig.brain.stop()  # the cut-in
+    time.sleep(0.05)
+    t_after = time.monotonic()  # a command received after the real stop, before stop is processed
+    time.sleep(0.05)
+    rig.brain.handle(Utterance("s", "stop", t_speech_end=time.time()), received_at=t_stop)
+    r = rig.brain.handle(Utterance("n", "new note"), received_at=t_after)
+    assert r.reason != "cancelled by stop"
+    assert len(rig.executor.log) == 2
+
+
+def test_stop_utterance_stamps_its_received_time() -> None:
+    rig = _fast(Rig(planner=FakePlanner()))
+    rig.plan_route("new note", NOTE_PLAN)
+    t_before = time.monotonic()
+    time.sleep(0.05)
+    t_stop = time.monotonic()
+    time.sleep(0.05)
+    rig.brain.handle(Utterance("s", "stop"), received_at=t_stop)
+    r = rig.brain.handle(Utterance("n", "new note"), received_at=t_before)
+    assert r.reason == "cancelled by stop"  # received before the stop
+
+
+def _rest_rig(planner: FakePlanner) -> Rig:
+    rig = _fast(Rig(planner=planner))
+    rig.router.plans["open x and go"] = Route(
+        kind="fastpath", plan=Plan("a", (Action.open_app("Notes"),)), rest="go on"
+    )
+    return rig
+
+
+def test_stop_during_open_app_prevents_rest_planning() -> None:
+    planner = FakePlanner([Plan("a", (Action.type_text("x"),))])
+    rig = _rest_rig(planner)
+
+    def hook(_s: str, _a: Action) -> ActionResult | None:
+        rig.brain.stop()
+        return None
+
+    rig.executor.hook = hook
+    rig.say("open x and go")
+    assert planner.calls == []
+    assert rig.events("error")[-1].data["message"] == "stopped"
+    assert "done" not in rig.types()
+
+
+def test_stop_during_rest_planning_prevents_confirm() -> None:
+    planner = FakePlanner()
+    rig = _rest_rig(planner)
+
+    def plan(text, snapshot, **kw):  # type: ignore[no-untyped-def]
+        rig.brain.stop()  # stop lands while the planner is thinking
+        return Plan(snapshot.snapshot_id, (Action.press(3),))  # Send: needs confirmation
+
+    planner.plan = plan  # type: ignore[method-assign]
+    rig.say("open x and go")
+    assert rig.brain._pending is None
+    assert "confirm" not in rig.types()
+
+
+def test_ask_confirm_refuses_after_stop() -> None:
+    rig = _fast(Rig(planner=FakePlanner()))
+    run = _run_for(rig)
+    rig.brain.stop()
+    out = rig.brain._ask_confirm(run, Plan("a", (Action.press(3),)), "why", lambda r, f: "ok")
+    assert out == "stopped"
+    assert rig.brain._pending is None
+    assert "confirm" not in rig.types()
+
+
+def test_stop_prevents_continuation_and_flow_fallback() -> None:
+    planner = FakePlanner([Plan("s", (Action.press(5),))])
+    rig = _fast(Rig(planner=planner))
+    rig.plan_route("dark mode", Plan("a", (Action.open_app("System Settings"),)), "planner")
+
+    def hook(_s: str, _a: Action) -> ActionResult | None:
+        rig.provider.snap = SETTINGS_SNAP
+        rig.brain.stop()
+        return None
+
+    rig.executor.hook = hook
+    rig.say("dark mode")
+    assert planner.calls == []
+    run = _run_for(rig)
+    rig.brain.stop()
+    assert rig.brain._flow_fallback(run, Flow("f", (FlowStep(Action.press(9)),)), 0, SNAP_A) == "stopped"
+    assert planner.calls == []

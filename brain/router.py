@@ -13,7 +13,7 @@ from typing import Protocol
 
 from brain.contracts import Action, Plan, Planner, Route, UISnapshot
 from brain.control import fold, normalize, parse_control
-from brain.fastpath import FastPath
+from brain.fastpath import FastPath, same_app
 from brain.flows import parse_teach
 
 FILLER_REASON = "empty or filler utterance"
@@ -40,9 +40,11 @@ class FlowMatcher(Protocol):
     def match(self, text: str) -> str | None: ...
 
 
+# Matched against whitespace-normalized text (single spaces only), so no \s+ / \s* runs that can
+# backtrack against each other: one anchored scan, linear in the input length.
 _COMPOUND = re.compile(
-    r"^(?:open|launch|start|switch to|go to)\s+(?:the\s+)?(.+?)(?:\s+(?:app|application))?"
-    r"\s*,?\s+(?:and then|and|then)\s+(.+)$",
+    r"^(?:open|launch|start|switch to|go to) (?:the )?(.+?)(?: (?:app|application))?,? "
+    r"(?:and then|and|then) (.+)$",
     re.IGNORECASE,
 )
 
@@ -100,15 +102,20 @@ class Router:
         return _timed(route, t0)
 
     def _compound(self, text: str, snapshot: UISnapshot) -> Route | None:
-        m = _COMPOUND.match(text.strip())
+        m = _COMPOUND.match(" ".join(text.split()))
         if not m:
             return None
         app = self.fastpath.resolve_app(m.group(1))
         rest = m.group(2).strip()
         if app is None or not rest:
             return None
-        if normalize(snapshot.app.name) == normalize(app):
+        if same_app(snapshot.app, app):
             return self.route_rest(rest, snapshot)  # already frontmost: no open_app
+        second = self.fastpath.resolve_app(rest.removeprefix("the ").removeprefix("The "))
+        if second is not None:  # "open pages and numbers": two apps, not "type 'numbers' in Pages"
+            actions = (Action.open_app(app), Action.open_app(second))
+            plan = Plan(snapshot.snapshot_id, actions, say=f"Opening {app} and {second}")
+            return Route(kind="fastpath", plan=plan, reason="compound")
         plan = Plan(snapshot.snapshot_id, (Action.open_app(app),), say=f"Opening {app}")
         return Route(kind="fastpath", plan=plan, rest=rest, reason="compound")
 

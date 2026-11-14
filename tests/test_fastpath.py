@@ -317,3 +317,24 @@ def test_latency_300_items() -> None:
         worst = max(worst, (time.perf_counter() - t0) * 1000)
     print(f"fastpath worst-case ms: {worst:.2f}")
     assert worst < 30, worst
+
+
+# ---- shared app matcher
+
+
+def test_same_app_aliases_and_bundle() -> None:
+    from brain.contracts import AppInfo
+    from brain.fastpath import same_app
+
+    assert same_app(AppInfo("Code", "com.microsoft.VSCode"), "Visual Studio Code")
+    assert same_app(AppInfo("Visual Studio Code"), "VS Code")
+    assert same_app(AppInfo("System Preferences"), "System Settings")
+    assert same_app(AppInfo("Notes"), "notes")
+    assert not same_app(AppInfo("Notes"), "Mail")
+    # bundle ids win when both sides have one
+    assert same_app(AppInfo("Whatever", "com.x.a"), "Other", "com.X.A")
+    assert not same_app(AppInfo("Notes", "com.x.a"), "Notes", "com.x.b")
+    # empty names never match
+    assert not same_app(AppInfo(""), "")
+    assert not same_app(AppInfo(""), "Notes")
+    assert not same_app(AppInfo("Notes"), "")
