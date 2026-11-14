@@ -254,7 +254,13 @@ function renderCard(u) {
   } else if (st === "run" && u.base != null) {
     foot.push(h("span", { class: "live-ms", "data-live": u.id, title: "Since end of speech" }, "0 ms"));
   }
-  if (u.done) foot.push(h("span", { class: "outcome done" }, `DONE · ${u.done.n_actions ?? u.actions.length} action(s) · ${fmtMs(u.ms)} total`));
+  if (u.done && u.done.saved) {
+    // teach ("call that standup"): say what was learned, not "0 actions"
+    const steps = u.done.n_steps != null ? ` · ${u.done.n_steps} step(s)` : "";
+    foot.push(h("span", { class: "outcome done" }, `SAVED flow “${u.done.saved}”${steps} · ${fmtMs(u.ms)}`));
+  } else if (u.done) {
+    foot.push(h("span", { class: "outcome done" }, `DONE · ${u.done.n_actions ?? u.actions.length} action(s) · ${fmtMs(u.ms)} total`));
+  }
   if (u.error) foot.push(h("span", { class: "outcome err" }, `✗ ERROR: ${u.error}`));
   if (st === "pending") foot.push(h("span", { class: "outcome wait" }, "waiting for your answer"));
   if (u.usage) foot.push(h("span", { class: "note" }, `model: ${u.usage.calls ?? "?"} call(s), ${(u.usage.prompt_tokens ?? 0) + (u.usage.completion_tokens ?? 0)} tokens`));
