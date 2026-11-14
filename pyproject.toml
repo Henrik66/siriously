@@ -1,0 +1,52 @@
+[project]
+name = "siriously-brain"
+version = "0.1.0"
+description = "Siriously brain: router, fast path, Bonsai planner, execution loop, flow memory, eval harness"
+requires-python = ">=3.11"
+dependencies = [
+    "rapidfuzz>=3.9",
+    "pyyaml>=6.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "websockets>=12.0",
+    # Mac UIProvider/Executor (brain.mac, Henrik): Accessibility API via pyobjc. Skipped off-Mac.
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+siriously-brain = "brain.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["brain"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "brain", "eval"]
+python_files = ["test_*.py", "*_test.py"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["smoke"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

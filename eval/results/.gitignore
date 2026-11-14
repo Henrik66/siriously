@@ -1,0 +1,2 @@
+# Eval run outputs (python -m eval.run_eval). Commit a run deliberately with `git add -f` if needed.
+*.json
