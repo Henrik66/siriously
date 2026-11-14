@@ -434,8 +434,17 @@ class Brain:
         return short_reply and score is not None and thr is not None and score >= thr - CONFIRM_SLACK
 
     def strip_wake(self, text, settings):
-        m = wake_rx(settings).match(text or "")
-        return (True, text[m.end():].strip()) if m else (False, text or "")
+        text, rx = text or "", wake_rx(settings)
+        if m := rx.match(text):
+            return True, text[m.end():].strip()
+        # Whisper glues a few words said just before into the same clip: "Right. Seriously, text Omar hello."
+        # Accept the wake word at the start of a later sentence (not mid-sentence: "that's seriously cool").
+        for b in re.finditer(r"[.!?]\s+", text):
+            if len(text[:b.start()].split()) > 6:
+                break
+            if m := rx.match(text[b.end():]):
+                return True, text[b.end() + m.end():].strip()
+        return False, text
 
     def try_stop(self, u):
         """Control words act immediately (PRD R1: < 50 ms), never queued behind a running plan."""
