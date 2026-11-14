@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One-command demo launcher for the Mac (PRD §1 demo).
 #
-#   scripts/run_demo.sh            # = start: Bonsai :8080 + Argmax STT :50060 (start_all.sh), then the brain :8765
+#   scripts/run_demo.sh            # = start: Bonsai :8080 (start_all.sh), the brain :8765, the mic daemon
+#                                  #   (mac/ear: speech-to-text + voice lock) and the overlay + menu bar app
 #   scripts/run_demo.sh status     # health of everything
 #   scripts/run_demo.sh stop       # stops only what this script started
 #
@@ -20,6 +21,10 @@ BRAIN_URL="http://127.0.0.1:$BRAIN_PORT"
 BRAIN_LOG="$LOGS/brain.log"
 BRAIN_PID="$LOGS/brain.pid"
 WAIT_SECONDS="${WAIT_SECONDS:-180}"
+EAR_BIN="$REPO/mac/ear/.build/release/siriously-ear"
+EAR_LOG="$LOGS/ear.log"
+OVERLAY_BIN="$REPO/mac/overlay/.build/release/siriously-overlay"
+OVERLAY_LOG="$LOGS/overlay.log"
 mkdir -p "$LOGS"
 
 say() { printf '%s\n' "$*"; }
@@ -46,8 +51,11 @@ warm_logged() { grep -q "planner warm" "$BRAIN_LOG" 2>/dev/null; }
 warm_failed() { grep -q "planner warmup failed" "$BRAIN_LOG" 2>/dev/null; }
 warm_done() { warm_logged || warm_failed; }
 
+ear_running() { pgrep -f "siriously-ear run" >/dev/null; }
+overlay_running() { pgrep -f "siriously-overlay" >/dev/null; }
+
 start_stack() {
-  say "== Bonsai + Argmax (start_all.sh)"
+  say "== Bonsai (start_all.sh)"
   if "$REPO/start_all.sh" status >/dev/null 2>&1; then
     say "  already healthy: reusing (run_demo stop will not stop it)"
     return 0
@@ -58,6 +66,11 @@ start_stack() {
 
 start_brain() {
   say "== Brain on $BRAIN_URL"
+  if brain_health | grep -q '"mini_brain"'; then
+    say "  the Mac mini brain is on :$BRAIN_PORT: stopping it (mac/switch_brain.sh mini brings it back)"
+    pkill -f "mac/mini_brain.py" || true
+    sleep 1
+  fi
   if [ -n "$(brain_health)" ]; then
     say "  already running: reusing (run_demo stop will not stop it)"
     return 0
@@ -90,6 +103,30 @@ start_brain() {
   fi
 }
 
+start_ear() {
+  say "== Mic daemon (speech-to-text + voice lock)"
+  if ear_running; then say "  already running: reusing"; return 0; fi
+  [ -x "$EAR_BIN" ] || die "build it first: swift build -c release --package-path mac/ear"
+  local from
+  from=$(( $(wc -l <"$EAR_LOG" 2>/dev/null || echo 0) + 1 ))
+  (cd "$REPO" && nohup "$EAR_BIN" run --save-audio >>"$EAR_LOG" 2>&1 &)
+  mark ear
+  # Models load in ~1 s when cached, ~35 s after a rebuild or a long idle (CoreML recompiles).
+  wait_for "mic daemon listening (models loaded)" "$WAIT_SECONDS" \
+    sh -c "tail -n +$from '$EAR_LOG' | grep -qE 'mic ok|listening paused'" \
+    || { tail -n 15 "$EAR_LOG"; die "mic daemon did not start"; }
+  tail -n +"$from" "$EAR_LOG" | grep -E "voice lock|mic ok|paused" | sed 's/^/  /'
+}
+
+start_overlay() {
+  say "== Overlay + menu bar app"
+  if overlay_running; then say "  already running: reusing"; return 0; fi
+  [ -x "$OVERLAY_BIN" ] || die "build it first: swift build -c release --package-path mac/overlay"
+  (cd "$REPO" && nohup "$OVERLAY_BIN" >>"$OVERLAY_LOG" 2>&1 &)
+  mark overlay
+  say "  ok: waveform icon in the menu bar"
+}
+
 offline_check() {
   say "== Offline check"
   if curl -s -o /dev/null -m 3 https://example.com; then
@@ -115,7 +152,15 @@ banner() {
 do_start() {
   start_stack
   start_brain
+  start_ear
+  start_overlay
   banner
+  say ""
+  if grep -E 'listening (paused|resumed)' "$EAR_LOG" | tail -1 | grep -q paused; then
+    say "Ready, but LISTENING IS PAUSED: switch it on in the menu bar (waveform icon)."
+  else
+    say "Ready. Say: \"Siriously, open Notes.\""
+  fi
   offline_check
 }
 
@@ -128,11 +173,18 @@ do_status() {
   h="$(brain_health)"
   if [ -n "$h" ]; then say "  $BRAIN_URL/health -> $h"; else say "  brain not responding on $BRAIN_URL"; rc=1; fi
   if [ -n "$h" ] && ! printf '%s' "$h" | grep -q '"bonsai":true'; then rc=1; fi
+  say "== Mac side"
+  if ear_running; then say "  mic daemon: running ($(grep -E 'listening (paused|resumed)' "$EAR_LOG" | tail -1 \
+    | grep -q paused && echo 'listening PAUSED in the menu bar' || echo listening))"
+  else say "  mic daemon: NOT running"; rc=1; fi
+  if overlay_running; then say "  overlay: running"; else say "  overlay: NOT running"; rc=1; fi
   offline_check || rc=$?
   return "$rc"
 }
 
 do_stop() {
+  if started overlay; then pkill -f "siriously-overlay" && say "stopped overlay"; fi
+  if started ear; then pkill -f "siriously-ear run" && say "stopped mic daemon"; fi
   if started brain && [ -f "$BRAIN_PID" ]; then
     local pid
     pid="$(cat "$BRAIN_PID")"

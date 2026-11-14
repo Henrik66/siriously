@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Start the local AI stack for the hackathon, fully offline, from ~/hackathon.
 #
-#   ./start_all.sh                 # Bonsai 2 4B (PrismML fork, :8080) + Argmax STT server (:50060)
+#   ./start_all.sh                 # Bonsai 2 4B (PrismML fork, :8080). Speech-to-text runs inside the mic
+#                                  # daemon (mac/ear: WhisperKit + SpeakerKit), started by scripts/run_demo.sh
 #   BONSAI=upstream ./start_all.sh # stock Homebrew llama.cpp + Q2_0 on :8080
 #   BONSAI=mlx ./start_all.sh      # mlx-vlm server on :8081
 #   SIZE=2B|4B|9B  STT=small.en|base.en|large-v3-v20240930_626MB  ./start_all.sh
-#   STT=none ./start_all.sh       # Bonsai only (the speech daemon mac/ear does STT in-process)
+#   STT=small.en ./start_all.sh    # also the standalone Argmax STT server on :50060 (not used by the demo)
 #   ./start_all.sh stop            # stop everything this script started
 #   ./start_all.sh status          # health-check only
 #
@@ -17,7 +18,7 @@ ARGMAX_MODELS="$EXT/models/argmax"
 LOGS="$EXT/logs"; mkdir -p "$LOGS"
 BONSAI="${BONSAI:-fork}"          # fork | upstream | mlx
 SIZE="${SIZE:-4B}"
-STT="${STT:-small.en}"   # base.en returned empty text on real mic speech
+STT="${STT:-none}"   # the demo's STT is in-process in mac/ear; small.en if you want the :50060 server
 STT_PORT="${STT_PORT:-50060}"
 
 # Never phone home: everything below loads from local paths.
@@ -111,6 +112,6 @@ else wait_healthy bonsai "http://127.0.0.1:8080/health" 180 || rc=1; fi
 
 echo
 echo "Bonsai  : http://127.0.0.1:$PORT/v1   (OpenAI chat; send sampling + thinking flags per request)"
-echo "Argmax  : http://127.0.0.1:$STT_PORT/v1/audio/transcriptions   (OpenAI audio API)"
+[ "$STT" != none ] && echo "Argmax  : http://127.0.0.1:$STT_PORT/v1/audio/transcriptions   (OpenAI audio API)"
 echo "Stop    : $0 stop"
 exit $rc
