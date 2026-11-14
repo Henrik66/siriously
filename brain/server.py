@@ -8,11 +8,12 @@
 - ``GET  /eval/latest``  eval scoreboard headline from the newest ``eval/results/*.json`` (read-only)
 
 Utterances run one at a time on a single worker thread, except a verified stop phrase (anything
-``brain.control.parse_control`` calls "stop": "stop", "stop stop", "wait", "hold on", ...), which calls
-``brain.stop()`` straight from the request so it cuts into a running burst, and cancels every utterance
-still queued behind it (each gets an ``error`` event, ``"cancelled by stop"``). With ``?wait=true`` a
-request whose utterance is cancelled gets 409 ``CANCELLED``; one that times out gets 504 ``TIMEOUT`` and an
-``error`` event, and its utterance is cancelled if it had not started yet.
+``brain.control.parse_control`` calls "stop": "stop", "stop stop", "wait", "hold on", ...), which cancels
+every utterance still queued (each gets an ``error`` event, ``"cancelled by stop"``), calls ``brain.stop()``
+straight from the request so it cuts into a running burst, and then runs ``brain.handle(stop)`` inline on
+the request (thread pool), never queued behind the running work, so its events go out at once.
+With ``?wait=true`` a request whose utterance is cancelled gets 409 ``CANCELLED``; one that times out gets
+504 ``TIMEOUT`` and an ``error`` event, and its utterance is cancelled if it had not started yet.
 
 Browser hardening (the API drives the user's Mac, and any web page can reach loopback):
 
@@ -21,9 +22,17 @@ Browser hardening (the API drives the user's Mac, and any web page can reach loo
 - Any HTTP request or WS upgrade carrying an ``Origin`` header is refused with 403 ``FORBIDDEN_ORIGIN``
   unless the origin is listed in ``SIRIOUSLY_ALLOWED_ORIGINS`` (comma-separated, default empty). The speech
   daemon, the CLI and other native clients send no ``Origin``. ``"null"`` is never accepted.
-- Optional shared secret: when ``SIRIOUSLY_TOKEN`` is set, every request except ``GET /health`` must send
-  it in ``X-Siriously-Token`` (WS clients that cannot set headers may use ``?token=``); else 401
-  ``UNAUTHORIZED``. Compared in constant time. ``python -m brain.cli`` sends it automatically.
+- Optional shared secret: when ``SIRIOUSLY_TOKEN`` is set, every request except ``GET /health`` and the
+  console's static files must send it in ``X-Siriously-Token``; else 401 ``UNAUTHORIZED``. Browsers cannot
+  set WS headers, so a WS upgrade may instead offer the subprotocols ``siriously`` and
+  ``token.<base64url(token), unpadded>`` (``Sec-WebSocket-Protocol``); the server answers ``siriously``,
+  never the token. The token is never accepted in a URL (``?token=`` is refused: URLs end up in logs and
+  history). Compared in constant time, never logged. ``python -m brain.cli`` sends the header itself.
+- Every response carries ``X-Frame-Options: DENY`` and a CSP with ``frame-ancestors 'none'`` (the console
+  must not be framed: a framed console has our origin, so its clicks would pass the Origin check), plus
+  ``nosniff`` and ``Referrer-Policy: no-referrer``. The console has no inline script or style.
+- A WS client that negotiates the ``siriously`` subprotocol (the console) first gets
+  ``{"hello": {"replay": N}}``: the next N messages are history replay, not live events.
 
 Bind to loopback (``SIRIOUSLY_HOST`` defaults to 127.0.0.1); set a token before binding anywhere else.
 No CDN assets anywhere. Run with ``uv run siriously-brain --fixture notes`` or
@@ -34,6 +43,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import contextlib
 import dataclasses
 import functools
@@ -59,9 +70,10 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
-from starlette.datastructures import Headers, QueryParams
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import Headers, MutableHeaders, QueryParams
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from brain.config import Settings
 from brain.contracts import (
@@ -89,9 +101,22 @@ ORIGINS_ENV = "SIRIOUSLY_ALLOWED_ORIGINS"
 TOKEN_ENV = "SIRIOUSLY_TOKEN"
 HOSTS_ENV = "SIRIOUSLY_ALLOWED_HOSTS"
 # Host-header allowlist defeats DNS rebinding (a page on evil.example resolving to 127.0.0.1).
-# "testserver" is Starlette's TestClient host; it is not resolvable from a browser.
-DEFAULT_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
+# Tests add Starlette's "testserver" through ``create_app(extra_hosts=...)``; the runtime never does.
+DEFAULT_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 TOKEN_HEADER = "X-Siriously-Token"
+WS_SUBPROTOCOL = "siriously"  # the console's WS protocol: auth via subprotocol, a replay "hello" first
+TOKEN_PROTOCOL_PREFIX = "token."  # + base64url(token) without padding, offered next to WS_SUBPROTOCOL
+_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; "
+    "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+)
+SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
+    ("X-Frame-Options", "DENY"),
+    ("Content-Security-Policy", CONTENT_SECURITY_POLICY),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+)
 CONSOLE_DIR = Path(__file__).resolve().parent / "console"
 CONSOLE_FILES = {  # URL path -> (file name, content type); an explicit whitelist, nothing else is served
     "/console": ("index.html", "text/html; charset=utf-8"),
@@ -187,10 +212,11 @@ def console_origins(settings: Settings) -> frozenset[str]:
     )
 
 
-def allowed_hosts(settings: Settings) -> frozenset[str]:
-    """Loopback names + the bind host + ``SIRIOUSLY_ALLOWED_HOSTS`` (comma-separated)."""
-    extra = {h.strip().lower() for h in os.environ.get(HOSTS_ENV, "").split(",") if h.strip()}
-    return DEFAULT_HOSTS | {str(settings.host).lower().strip("[]")} | extra
+def allowed_hosts(settings: Settings, extra_hosts: Iterable[str] = ()) -> frozenset[str]:
+    """Loopback names + the bind host + ``SIRIOUSLY_ALLOWED_HOSTS`` (comma-separated) + ``extra_hosts``."""
+    env = {h.strip().lower() for h in os.environ.get(HOSTS_ENV, "").split(",") if h.strip()}
+    extra = {h.strip().lower() for h in extra_hosts if h.strip()}
+    return DEFAULT_HOSTS | {str(settings.host).lower().strip("[]")} | env | extra
 
 
 def _host_of(header: str | None) -> str:
@@ -204,6 +230,26 @@ def api_token(settings: Settings) -> str | None:
     """``settings.token`` if present, else ``SIRIOUSLY_TOKEN``; None when unset or empty."""
     raw: object = getattr(settings, "token", None) or os.environ.get(TOKEN_ENV)
     return str(raw) if raw else None
+
+
+def ws_subprotocols(headers: Headers) -> list[str]:
+    """The subprotocols a WS upgrade offers (``Sec-WebSocket-Protocol``, comma-separated)."""
+    return [p.strip() for p in headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
+
+
+def subprotocol_token(protocols: Sequence[str]) -> bytes | None:
+    """The token from a ``token.<base64url>`` subprotocol; None when absent or not valid base64url."""
+    for proto in protocols:
+        if not proto.startswith(TOKEN_PROTOCOL_PREFIX):
+            continue
+        encoded = proto[len(TOKEN_PROTOCOL_PREFIX) :]
+        if not _B64URL_RE.match(encoded):
+            return None
+        try:
+            return base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        except (binascii.Error, ValueError):
+            return None
+    return None
 
 
 def _is_json(content_type: str | None) -> bool:
@@ -236,10 +282,14 @@ class AccessGuard:
             return 403, f"origin {origin!r} is not allowed (see {ORIGINS_ENV})", "FORBIDDEN_ORIGIN"
         path = str(scope.get("path", ""))
         if self.token is not None and path not in TOKEN_EXEMPT_PATHS:
-            given = headers.get(TOKEN_HEADER)
+            header = headers.get(TOKEN_HEADER)
+            given = header.encode() if header is not None else None
             if given is None and scope["type"] == "websocket":
-                given = QueryParams(scope.get("query_string", b"")).get("token")
-            if given is None or not hmac.compare_digest(given.encode(), self.token):
+                given = subprotocol_token(ws_subprotocols(headers))
+            if given is None or not hmac.compare_digest(given, self.token):
+                if "token" in QueryParams(scope.get("query_string", b"")):
+                    hint = f"send {TOKEN_HEADER} or the 'token.<base64url>' WS subprotocol"
+                    return 401, f"?token= is not accepted; {hint}", "UNAUTHORIZED"
                 return 401, f"missing or wrong {TOKEN_HEADER}", "UNAUTHORIZED"
         is_post = scope["type"] == "http" and scope.get("method") == "POST"
         if is_post and path in JSON_ONLY_PATHS and not _is_json(headers.get("content-type")):
@@ -262,6 +312,27 @@ class AccessGuard:
             await websocket.send_denial_response(response)
         else:
             await websocket.close(code=1008)  # policy violation; the server answers the handshake 403
+
+
+class SecurityHeaders:
+    """Pure ASGI middleware adding ``SECURITY_HEADERS`` to every HTTP response (errors and denials too)."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in SECURITY_HEADERS:
+                    headers[name] = value
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +431,8 @@ class Dispatcher:
             return True
         return False
 
-    def submit(self, utt: Utterance) -> Future[Route]:
-        received_at = time.monotonic()
+    def submit(self, utt: Utterance, received_at: float | None = None) -> Future[Route]:
+        received_at = time.monotonic() if received_at is None else received_at
         with self._lock:  # _run takes the lock too, so it can't start before it is listed
             future = self._pool.submit(self._run, utt, received_at)
             self._queued.append((utt, future))
@@ -393,6 +464,10 @@ class Dispatcher:
     def _run(self, utt: Utterance, received_at: float) -> Route:
         with self._lock:
             self._queued = [(u, f) for u, f in self._queued if u is not utt]
+        return self.handle_now(utt, received_at)
+
+    def handle_now(self, utt: Utterance, received_at: float) -> Route:
+        """``brain.handle`` on the calling thread (the worker, or a request thread for a stop)."""
         try:
             if self._pass_received_at:
                 handle: Callable[..., Route] = self.brain.handle
@@ -439,8 +514,13 @@ def create_app(
     brain: BrainLike | BrainFactory,
     bus: EventBus | None = None,
     settings: Settings | None = None,
+    *,
+    extra_hosts: Iterable[str] = (),
 ) -> FastAPI:
-    """Build the app. ``brain`` may be a Brain or a factory taking the EventSink (the bus)."""
+    """Build the app. ``brain`` may be a Brain or a factory taking the EventSink (the bus).
+
+    ``extra_hosts`` widens the Host allowlist (tests pass Starlette's ``"testserver"``).
+    """
     bus = bus if bus is not None else EventBus()
     settings = settings if settings is not None else Settings()
     the_brain = _resolve_brain(brain, bus)
@@ -462,23 +542,32 @@ def create_app(
         AccessGuard,
         origins=allowed_origins(settings) | console_origins(settings),
         token=api_token(settings),
-        hosts=allowed_hosts(settings),
+        hosts=allowed_hosts(settings, extra_hosts),
     )
+    app.add_middleware(SecurityHeaders)  # added last = outermost: also covers AccessGuard's denials
     _install_error_handlers(app)
 
     async def dispatch(utt: Utterance, wait: bool) -> JSONResponse:
-        stopped = dispatcher.cut_in(utt)
-        future = dispatcher.submit(utt)
+        received_at = time.monotonic()
+        if dispatcher.cut_in(utt):
+            # The stop path takes no brain lock: handle it right here, not behind the running work.
+            inline = asyncio.ensure_future(run_in_threadpool(dispatcher.handle_now, utt, received_at))
+            result = await wait_for_route(utt, inline, queued=False)
+            if wait:
+                return result
+            return JSONResponse(status_code=202, content=Accepted(id=utt.id, stopped=True).model_dump())
+        future = dispatcher.submit(utt, received_at)
         if not wait:
-            return JSONResponse(status_code=202, content=Accepted(id=utt.id, stopped=stopped).model_dump())
-        return await wait_for_route(utt, future)
+            return JSONResponse(status_code=202, content=Accepted(id=utt.id).model_dump())
+        return await wait_for_route(utt, asyncio.wrap_future(future), queued=True)
 
-    async def wait_for_route(utt: Utterance, future: Future[Route]) -> JSONResponse:
-        waiter = asyncio.wrap_future(future)
+    async def wait_for_route(utt: Utterance, waiter: asyncio.Future[Route], *, queued: bool) -> JSONResponse:
         done, _ = await asyncio.wait({waiter}, timeout=wait_timeout)  # unlike wait_for, never cancels
         if not done:
+            waiter.add_done_callback(_consume_result)
             limit = f"no result after {wait_timeout:.1f}s"
-            if not dispatcher.cancel_queued(f"{limit}; cancelled before it started", only=utt):
+            cancelled = queued and dispatcher.cancel_queued(f"{limit}; cancelled before it started", only=utt)
+            if not cancelled:
                 dispatcher.emit_error(utt, f"{limit} (still running)")
             return _error(504, f"utterance {utt.id} did not finish in {wait_timeout:.1f}s", "TIMEOUT")
         if waiter.cancelled():
@@ -519,7 +608,12 @@ def create_app(
 
     @app.get("/health")
     async def health() -> JSON:
-        return {"ok": True, "bonsai": await probe.check(), "flows": _flow_count(the_brain)}
+        return {
+            "ok": True,
+            "bonsai": await probe.check(),
+            "flows": _flow_count(the_brain),
+            "confirm_ttl_s": settings.confirm_ttl_s,  # how long a confirm / question stays answerable
+        }
 
     def console_file(path: str) -> Callable[[], FileResponse]:
         name, media_type = CONSOLE_FILES[path]
@@ -547,9 +641,16 @@ def create_app(
 
     @app.websocket("/events")
     async def events_ws(websocket: WebSocket, history: int = Query(0, ge=0, le=200)) -> None:
-        await stream_events(websocket, bus, history)
+        offered = WS_SUBPROTOCOL in ws_subprotocols(websocket.headers)
+        await stream_events(websocket, bus, history, subprotocol=WS_SUBPROTOCOL if offered else None)
 
     return app
+
+
+def _consume_result(fut: asyncio.Future[Route]) -> None:
+    """Retrieve a late result/exception so asyncio does not log "exception was never retrieved"."""
+    if not fut.cancelled():
+        fut.exception()
 
 
 def _latest_eval() -> JSONResponse:
@@ -585,11 +686,20 @@ def _install_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, on_http)
 
 
-async def stream_events(websocket: WebSocket, bus: EventBus, history: int = 0) -> None:
-    """Pump bus events to one WS client until it disconnects."""
+async def stream_events(
+    websocket: WebSocket, bus: EventBus, history: int = 0, *, subprotocol: str | None = None
+) -> None:
+    """Pump bus events to one WS client until it disconnects.
+
+    With ``subprotocol`` (the console's ``siriously``) the client first gets ``{"hello": {"replay": N}}``,
+    N being how many of the following messages are history replay rather than live events.
+    """
     sub = bus.subscribe(replay=history)  # before accept: nothing emitted after connect is missed
+    replayed = sub.qsize()  # exact: live events reach the queue only via this loop, which hasn't yielded
     try:
-        await websocket.accept()
+        await websocket.accept(subprotocol=subprotocol)
+        if subprotocol is not None:
+            await websocket.send_text(json.dumps({"hello": {"replay": replayed}}))
         # anyio (Starlette's own concurrency layer) so both halves die with the request's cancel scope.
         async with anyio.create_task_group() as tg:
 

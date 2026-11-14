@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import socket
@@ -13,6 +14,7 @@ from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
@@ -22,7 +24,10 @@ from brain import server as server_mod
 from brain.config import Settings
 from brain.contracts import JSON, Event, EventSink, Route, Utterance
 from brain.events import EventBus
-from brain.server import bonsai_health_url, create_app, is_stop, main, make_io
+from brain.server import BrainFactory, BrainLike, bonsai_health_url, create_app, is_stop, main, make_io
+
+# Starlette's TestClient sends ``Host: testserver``; only tests allow it (never the runtime defaults).
+TEST_HOSTS = frozenset({"testserver"})
 
 # ---------------------------------------------------------------------------
 # Fakes and helpers
@@ -110,6 +115,12 @@ def down_settings() -> Settings:
     return Settings(bonsai_url=f"http://127.0.0.1:{free_port()}/v1")
 
 
+def make_app(
+    brain: BrainLike | BrainFactory, bus: EventBus | None = None, settings: Settings | None = None
+) -> FastAPI:
+    return create_app(brain, bus, settings, extra_hosts=TEST_HOSTS)
+
+
 @pytest.fixture
 def bus() -> EventBus:
     return EventBus(log=False)
@@ -122,7 +133,7 @@ def fake(bus: EventBus) -> FakeBrain:
 
 @pytest.fixture
 def client(fake: FakeBrain, bus: EventBus) -> Iterator[TestClient]:
-    with TestClient(create_app(fake, bus, down_settings())) as c:
+    with TestClient(make_app(fake, bus, down_settings())) as c:
         yield c
 
 
@@ -173,7 +184,7 @@ def test_utterance_wait_returns_route(client: TestClient, fake: FakeBrain) -> No
 
 def test_brain_exception_gives_500_and_error_event(bus: EventBus) -> None:
     brain = FakeBrain(bus, fail=True)
-    with TestClient(create_app(brain, bus, down_settings())) as c:
+    with TestClient(make_app(brain, bus, down_settings())) as c:
         r = c.post("/utterance?wait=true", json=utt_json("u-3", "explode"))
     assert r.status_code == 500
     assert r.json()["code"] == "BRAIN_ERROR"
@@ -195,7 +206,7 @@ def test_utterances_are_serialized(client: TestClient, fake: FakeBrain) -> None:
 
 def test_stop_cuts_into_running_burst() -> None:
     brain = BlockingBrain()
-    with TestClient(create_app(brain, EventBus(log=False), down_settings())) as c:
+    with TestClient(make_app(brain, EventBus(log=False), down_settings())) as c:
         assert c.post("/utterance", json=utt_json("u-1", "write a long essay")).status_code == 202
         assert brain.started.wait(3)
         t0 = time.monotonic()
@@ -205,14 +216,75 @@ def test_stop_cuts_into_running_burst() -> None:
     assert r.json()["kind"] == "control" and r.json()["control"] == "stop"
     assert elapsed < 2.0  # did not wait for the 5 s burst timeout
     assert brain.stop_calls >= 1
-    assert brain.finished == ["u-1", "u-2"]  # burst aborted, then the stop itself was handled
+    wait_until(lambda: sorted(brain.finished) == ["u-1", "u-2"])  # burst aborted; the stop handled too
+
+
+class StubbornBrain:
+    """A burst that ignores stop() until released; records which thread handled each utterance."""
+
+    def __init__(self, sink: EventSink) -> None:
+        self.sink = sink
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.stop_calls = 0
+        self.calls: list[tuple[str, str, float | None]] = []  # (id, thread name, received_at)
+
+    def handle(self, utt: Utterance, received_at: float | None = None) -> Route:
+        self.calls.append((utt.id, threading.current_thread().name, received_at))
+        self.sink.emit(Event("heard", utt.id, {"text": utt.text}))
+        if is_stop(utt.text):
+            self.sink.emit(Event("done", utt.id, {"route": "control", "n_actions": 0, "ms": 0}))
+            return Route(kind="control", control="stop")
+        self.started.set()
+        self.release.wait(timeout=5)
+        self.sink.emit(Event("done", utt.id, {"route": "planner", "n_actions": 1, "ms": 1}))
+        return Route(kind="planner", reason="completed")
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+
+def test_stop_is_handled_inline_not_behind_running_work(bus: EventBus) -> None:
+    """The stop utterance runs on the request (thread pool), never queued behind the busy worker."""
+    brain = StubbornBrain(bus)
+    with TestClient(make_app(brain, bus, down_settings())) as c:
+        assert c.post("/utterance", json=utt_json("u-1", "write a long essay")).status_code == 202
+        assert brain.started.wait(3)
+        t0 = time.monotonic()
+        r = c.post("/utterance?wait=true", json=utt_json("u-s", "stop"))
+        t1 = time.monotonic()
+        assert r.status_code == 200 and r.json()["control"] == "stop"
+        assert t1 - t0 < 2.0
+        assert brain.stop_calls == 1
+        # the stop's events are already out while u-1 is still running
+        done = [e.utterance_id for e in bus.history if e.type == "done"]
+        assert done == ["u-s"]
+        assert c.app.state.dispatcher.queued_ids() == []  # type: ignore[attr-defined]
+        brain.release.set()
+        wait_until(lambda: len([e for e in bus.history if e.type == "done"]) == 2)
+    by_id = {uid: (thread, got) for uid, thread, got in brain.calls}
+    assert not by_id["u-s"][0].startswith("brain-worker")
+    assert by_id["u-1"][0].startswith("brain-worker")
+    stop_received = by_id["u-s"][1]
+    assert stop_received is not None and t0 <= stop_received <= t1
 
 
 def test_stop_without_wait_reports_stopped(fake: FakeBrain, client: TestClient) -> None:
     r = client.post("/utterance", json=utt_json("u-9", "stop"))
     assert r.status_code == 202 and r.json()["stopped"] is True
     assert fake.stops == 1
-    wait_until(lambda: [u.id for u in fake.handled] == ["u-9"])
+    assert [u.id for u in fake.handled] == ["u-9"]  # handled before the 202 went out
+
+
+def test_stop_handle_failure_is_reported(bus: EventBus) -> None:
+    brain = FakeBrain(bus, fail=True)
+    with TestClient(make_app(brain, bus, down_settings())) as c:
+        r = c.post("/utterance?wait=true", json=utt_json("u-s", "stop"))
+        assert r.status_code == 500 and r.json()["code"] == "BRAIN_ERROR"
+        r = c.post("/utterance", json=utt_json("u-t", "stop"))
+        assert r.status_code == 202 and r.json()["stopped"] is True
+        assert brain.stops == 2  # (shutdown calls stop() once more)
+    assert set(_errors(bus)) == {"u-s", "u-t"}
 
 
 def test_unverified_stop_does_not_cut_in(fake: FakeBrain, client: TestClient) -> None:
@@ -276,7 +348,21 @@ def test_events_history_endpoint(client: TestClient, bus: EventBus) -> None:
 
 def test_health_bonsai_down(client: TestClient) -> None:
     body = client.get("/health").json()
-    assert body == {"ok": True, "bonsai": False, "flows": 2}
+    assert body == {"ok": True, "bonsai": False, "flows": 2, "confirm_ttl_s": 20.0}
+
+
+def test_health_reports_confirm_ttl(fake: FakeBrain, bus: EventBus) -> None:
+    settings = Settings(bonsai_url=down_settings().bonsai_url, confirm_ttl_s=7.5)
+    with TestClient(make_app(fake, bus, settings)) as c:
+        assert c.get("/health").json()["confirm_ttl_s"] == 7.5
+
+
+def test_runtime_hosts_do_not_include_testserver(fake: FakeBrain, bus: EventBus) -> None:
+    assert "testserver" not in server_mod.DEFAULT_HOSTS
+    with TestClient(create_app(fake, bus, down_settings())) as c:
+        r = c.get("/health")  # TestClient's default Host is "testserver"
+        assert r.status_code == 403 and r.json()["code"] == "FORBIDDEN_HOST"
+        assert c.get("/health", headers={"Host": "127.0.0.1:8765"}).status_code == 200
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -294,7 +380,7 @@ def test_health_bonsai_up_and_cached(bus: EventBus) -> None:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     settings = Settings(bonsai_url=f"http://127.0.0.1:{server.server_address[1]}/v1")
     try:
-        with TestClient(create_app(FakeBrain(bus), bus, settings)) as c:
+        with TestClient(make_app(FakeBrain(bus), bus, settings)) as c:
             assert c.get("/health").json()["bonsai"] is True
             server.shutdown()
             server.server_close()
@@ -342,7 +428,7 @@ def test_app_accepts_brain_factory(bus: EventBus) -> None:
         made.append(FakeBrain(sink))
         return made[-1]
 
-    with TestClient(create_app(factory, bus, down_settings())) as c:
+    with TestClient(make_app(factory, bus, down_settings())) as c:
         c.post("/text?wait=true", json={"text": "hi"})
     assert made[0].sink is bus
     assert [e.type for e in bus.history] == ["heard", "route", "done"]
@@ -423,7 +509,7 @@ def test_cross_origin_ws_rejected(client: TestClient, bus: EventBus) -> None:
 
 def test_allowed_origin_passes(monkeypatch: pytest.MonkeyPatch, fake: FakeBrain, bus: EventBus) -> None:
     monkeypatch.setenv("SIRIOUSLY_ALLOWED_ORIGINS", "http://localhost:5173, app://overlay")
-    with TestClient(create_app(fake, bus, down_settings())) as c:
+    with TestClient(make_app(fake, bus, down_settings())) as c:
         ok = {"Origin": "http://localhost:5173"}
         assert c.post("/utterance", json=utt_json("u-1", "x"), headers=ok).status_code == 202
         with c.websocket_connect("/events", headers={"Origin": "app://overlay"}):
@@ -435,7 +521,7 @@ def test_allowed_origin_passes(monkeypatch: pytest.MonkeyPatch, fake: FakeBrain,
 @pytest.fixture
 def token_client(monkeypatch: pytest.MonkeyPatch, fake: FakeBrain, bus: EventBus) -> Iterator[TestClient]:
     monkeypatch.setenv("SIRIOUSLY_TOKEN", "s3cret")
-    with TestClient(create_app(fake, bus, down_settings())) as c:
+    with TestClient(make_app(fake, bus, down_settings())) as c:
         yield c
 
 
@@ -452,13 +538,44 @@ def test_token_required_when_configured(token_client: TestClient, fake: FakeBrai
     wait_until(lambda: [u.id for u in fake.handled] == ["u-2"])
 
 
-def test_ws_token_header_or_query(token_client: TestClient) -> None:
+def _token_protocol(token: str) -> str:
+    return "token." + base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
+
+
+def test_ws_token_header_or_subprotocol(token_client: TestClient) -> None:
     assert _ws_refused(token_client, "/events") in (401, 1008)
-    assert _ws_refused(token_client, "/events?token=nope") in (401, 1008)
-    with token_client.websocket_connect("/events?token=s3cret"):
-        pass
     with token_client.websocket_connect("/events", headers={"X-Siriously-Token": "s3cret"}):
         pass
+    protocols = ["siriously", _token_protocol("s3cret")]
+    with token_client.websocket_connect("/events", subprotocols=protocols) as ws:
+        assert ws.accepted_subprotocol == "siriously"  # the token itself is never echoed back
+    bad = {"Sec-WebSocket-Protocol": f"siriously, {_token_protocol('nope')}"}
+    assert _ws_refused(token_client, "/events", bad) in (401, 1008)
+    assert _ws_refused(token_client, "/events", {"Sec-WebSocket-Protocol": "siriously, token.%%%"}) in (
+        401,
+        1008,
+    )
+
+
+def test_ws_query_token_no_longer_accepted(
+    token_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The token must not travel in the URL (access logs, history); ``?token=`` is refused."""
+    with caplog.at_level("WARNING", logger="brain.server"):
+        assert _ws_refused(token_client, "/events?token=s3cret") in (401, 1008)
+    assert "s3cret" not in caplog.text
+
+
+def test_ws_siriously_subprotocol_gets_replay_hello(client: TestClient, bus: EventBus) -> None:
+    for i in range(3):
+        bus.emit(Event("action", "u-1", {"i": i}))
+    with client.websocket_connect("/events?history=2", subprotocols=["siriously"]) as ws:
+        assert ws.accepted_subprotocol == "siriously"
+        assert ws.receive_json() == {"hello": {"replay": 2}}
+        assert [ws.receive_json()["data"]["i"] for _ in range(2)] == [1, 2]
+    with client.websocket_connect("/events?history=2") as ws:  # plain clients see events only
+        assert ws.accepted_subprotocol is None
+        assert ws.receive_json()["data"]["i"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +594,7 @@ def _queued(c: TestClient) -> list[str]:
 
 def test_stop_cancels_queued_utterances() -> None:
     brain, bus = BlockingBrain(), EventBus(log=False)
-    with TestClient(create_app(brain, bus, down_settings())) as c:
+    with TestClient(make_app(brain, bus, down_settings())) as c:
         assert c.post("/utterance", json=utt_json("u-1", "write a long essay")).status_code == 202
         assert brain.started.wait(3)
         for uid in ("u-2", "u-3"):
@@ -486,7 +603,8 @@ def test_stop_cancels_queued_utterances() -> None:
         r = c.post("/utterance?wait=true", json=utt_json("u-s", "stop stop"))
         assert r.status_code == 200 and r.json()["control"] == "stop"
         assert _queued(c) == []
-    assert brain.finished == ["u-1", "u-s"]  # u-2 / u-3 never ran
+        wait_until(lambda: len(brain.finished) == 2)
+    assert sorted(brain.finished) == ["u-1", "u-s"]  # u-2 / u-3 never ran
     assert _errors(bus) == {"u-2": "cancelled by stop", "u-3": "cancelled by stop"}
 
 
@@ -504,7 +622,7 @@ class ReceivedAtBrain(FakeBrain):
 
 def test_received_at_is_passed_when_supported(bus: EventBus) -> None:
     brain = ReceivedAtBrain(bus)
-    with TestClient(create_app(brain, bus, down_settings())) as c:
+    with TestClient(make_app(brain, bus, down_settings())) as c:
         t0 = time.monotonic()
         assert c.post("/utterance?wait=true", json=utt_json("u-1", "open notes")).status_code == 200
         t1 = time.monotonic()
@@ -522,7 +640,7 @@ def test_other_stop_phrasings_cut_in(fake: FakeBrain, client: TestClient, text: 
 def test_waiting_request_for_cancelled_utterance_gets_409() -> None:
     brain, bus = BlockingBrain(), EventBus(log=False)
     codes: list[tuple[int, str]] = []
-    with TestClient(create_app(brain, bus, down_settings())) as c:
+    with TestClient(make_app(brain, bus, down_settings())) as c:
         c.post("/utterance", json=utt_json("u-1", "write a long essay"))
         assert brain.started.wait(3)
 
@@ -542,7 +660,7 @@ def test_wait_timeout_cancels_queued_and_emits_error(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(server_mod, "WAIT_MARGIN_S", 0.0)
     brain, bus = BlockingBrain(), EventBus(log=False)
     settings = Settings(bonsai_url=down_settings().bonsai_url, utterance_timeout_s=0.3)
-    with TestClient(create_app(brain, bus, settings)) as c:
+    with TestClient(make_app(brain, bus, settings)) as c:
         c.post("/utterance", json=utt_json("u-1", "write a long essay"))
         assert brain.started.wait(3)
         r = c.post("/utterance?wait=true", json=utt_json("u-2", "delete this note"))
@@ -558,7 +676,7 @@ def test_wait_timeout_while_running_emits_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(server_mod, "WAIT_MARGIN_S", 0.0)
     brain, bus = BlockingBrain(), EventBus(log=False)
     settings = Settings(bonsai_url=down_settings().bonsai_url, utterance_timeout_s=0.3)
-    with TestClient(create_app(brain, bus, settings)) as c:
+    with TestClient(make_app(brain, bus, settings)) as c:
         r = c.post("/utterance?wait=true", json=utt_json("u-1", "write a long essay"))
         assert r.status_code == 504
         assert "still running" in _errors(bus)["u-1"]
@@ -634,7 +752,7 @@ def live_port(fake: FakeBrain, bus: EventBus) -> Iterator[int]:
 
     port = free_port()
     server = uvicorn.Server(
-        uvicorn.Config(create_app(fake, bus, down_settings()), host="127.0.0.1", port=port, log_level="error")
+        uvicorn.Config(make_app(fake, bus, down_settings()), host="127.0.0.1", port=port, log_level="error")
     )
     th = threading.Thread(target=server.run, daemon=True)
     th.start()
@@ -676,7 +794,7 @@ def secured_live_port(monkeypatch: pytest.MonkeyPatch, fake: FakeBrain, bus: Eve
     monkeypatch.setenv("SIRIOUSLY_TOKEN", "s3cret")
     port = free_port()
     server = uvicorn.Server(
-        uvicorn.Config(create_app(fake, bus, down_settings()), host="127.0.0.1", port=port, log_level="error")
+        uvicorn.Config(make_app(fake, bus, down_settings()), host="127.0.0.1", port=port, log_level="error")
     )
     th = threading.Thread(target=server.run, daemon=True)
     th.start()

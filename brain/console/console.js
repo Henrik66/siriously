@@ -12,6 +12,9 @@ const CONFIG = {
   MAX_CARDS: 40,
   BACKOFF_MS: [500, 1000, 2000, 4000, 8000],
   LIVE_MS_LIMIT: 15000, // stop the live counter after this (replayed or stuck utterances)
+  // A confirm / question banner disappears this long after it arrived (the brain forgets it then too).
+  // Default matches the server's confirm_ttl_s; replaced at boot by /health's confirm_ttl_s.
+  CONFIRM_TTL_MS: 20000,
   EVAL_REFRESH_MS: 60000,
   GOOD: 0.85,
   WARN: 0.7,
@@ -47,13 +50,26 @@ const median = (xs) => {
 const pct = (r) => (r == null ? "—" : `${Math.round(r * 100)}%`);
 const tone = (r) => (r == null ? "" : r >= CONFIG.GOOD ? "t-good" : r >= CONFIG.WARN ? "t-warn" : "t-bad");
 
-// Optional shared secret: open the page as /console#token=... and it is sent on every call.
+// Optional shared secret: open the page as /console#token=... and it is sent on every call. The fragment
+// is wiped from the address bar (and this history entry) as soon as it is read.
 const TOKEN = (() => {
   const m = /[#&]token=([^&]+)/.exec(location.hash);
-  if (m) sessionStorage.setItem("siriously-token", decodeURIComponent(m[1]));
+  if (m) {
+    sessionStorage.setItem("siriously-token", decodeURIComponent(m[1]));
+    history.replaceState(null, "", location.pathname + location.search);
+  }
   return sessionStorage.getItem("siriously-token") || "";
 })();
 const authHeaders = () => (TOKEN ? { "X-Siriously-Token": TOKEN } : {});
+
+/** base64url (no padding) of the UTF-8 bytes: a valid Sec-WebSocket-Protocol token for any secret. */
+function b64url(text) {
+  let bin = "";
+  for (const byte of new TextEncoder().encode(text)) bin += String.fromCharCode(byte);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+// Browsers cannot set WS headers, so the token rides the subprotocol list, never the URL.
+const wsProtocols = () => (TOKEN ? ["siriously", "token." + b64url(TOKEN)] : ["siriously"]);
 
 // ---- human-readable actions ---------------------------------------------------------------------
 const KEY_NAMES = {
@@ -101,7 +117,7 @@ function getUtt(id) {
   if (!u) {
     u = {
       id, text: null, speaker: null, rejected: null, route: null, planned: [], labels: new Map(),
-      actions: [], confirm: null, ask: null, done: null, error: null,
+      actions: [], confirm: null, ask: null, expired: false, done: null, error: null,
       base: null, // performance.now() - ms_since_speech_end at first live event
       firstMs: null, usage: null, el: null, fresh: true,
     };
@@ -111,7 +127,49 @@ function getUtt(id) {
   return u;
 }
 
-function clearBanner() { state.banner = null; renderBanner(); }
+// ---- confirm / question banner ------------------------------------------------------------------
+// A banner is raised only by a live event and expires CONFIRM_TTL_MS after it arrived. History replayed
+// on (re)connect never raises one; it only decides whether a banner shown before the reconnect survives.
+let bannerTimer = 0;
+let replayBanner = null; // what the replayed history alone would show (never displayed)
+
+function setBanner(b) {
+  clearTimeout(bannerTimer);
+  state.banner = b;
+  if (b) bannerTimer = setTimeout(() => expireBanner(b), Math.max(0, b.expires - performance.now()));
+  renderBanner();
+}
+
+function expireBanner(b) {
+  if (state.banner !== b) return;
+  const u = state.utts.get(b.uid);
+  if (u) { u.expired = true; schedule(u); }
+  setBanner(null);
+}
+
+function raiseBanner(b, live) {
+  if (!live) { replayBanner = b; return; }
+  setBanner({ ...b, expires: performance.now() + CONFIG.CONFIRM_TTL_MS });
+}
+
+function clearBanner(live) {
+  if (!live) { replayBanner = null; return; }
+  if (state.banner) setBanner(null);
+}
+
+/** End of history replay: keep a pre-reconnect banner only if the history still ends on it. */
+function finishReplay() {
+  const b = state.banner;
+  const keep = b && replayBanner && b.uid === replayBanner.uid && b.kind === replayBanner.kind &&
+    b.expires > performance.now();
+  replayBanner = null;
+  if (keep) {
+    const u = state.utts.get(b.uid);
+    if (u) { u.expired = false; schedule(u); }
+  } else if (b) {
+    setBanner(null);
+  }
+}
 
 function applyEvent(ev, live) {
   const d = ev.data || {};
@@ -119,11 +177,11 @@ function applyEvent(ev, live) {
   if (u.base == null && live && ev.ms_since_speech_end > 0) u.base = performance.now() - ev.ms_since_speech_end;
   switch (ev.type) {
     case "heard":
-      clearBanner(); // any new utterance consumes a pending confirm / question
+      clearBanner(live); // any new utterance consumes a pending confirm / question
       u.text = d.text ?? ""; u.speaker = d.speaker || null;
       break;
     case "rejected":
-      clearBanner();
+      clearBanner(live);
       u.rejected = { text: d.text ?? "", score: d.score };
       break;
     case "route": u.route = d; break;
@@ -135,15 +193,15 @@ function applyEvent(ev, live) {
       if (Array.isArray(d.ask)) {
         d.ask.forEach((id, i) => u.labels.set(id, (d.labels || [])[i] || `#${id}`));
         u.ask = { ids: d.ask, labels: d.labels || [] };
-        state.banner = { kind: "ask", ask: u.ask };
-        renderBanner();
+        u.expired = !live;
+        raiseBanner({ kind: "ask", uid: u.id, ask: u.ask }, live);
       }
       break;
     }
     case "confirm":
       u.confirm = { reason: d.reason || "", plan: d.plan };
-      state.banner = { kind: "confirm", reason: d.reason || "this action", plan: d.plan };
-      renderBanner();
+      u.expired = !live;
+      raiseBanner({ kind: "confirm", uid: u.id, reason: d.reason || "this action", plan: d.plan }, live);
       break;
     case "action":
       u.actions.push({ i: d.i, action: d.action || {}, ok: !!d.ok, error: d.error });
@@ -152,11 +210,11 @@ function applyEvent(ev, live) {
       break;
     case "done":
       u.done = d; u.ms = ev.ms_since_speech_end; u.usage = d.usage || null;
-      clearBanner();
+      clearBanner(live);
       break;
     case "error":
       u.error = d.message || "error";
-      clearBanner();
+      clearBanner(live);
       break;
     default: return;
   }
@@ -182,7 +240,7 @@ function status(u) {
   if (u.rejected) return "rejected";
   if (u.error) return "error";
   if (u.done) return "done";
-  if (u.confirm || u.ask) return "pending";
+  if (u.confirm || u.ask) return u.expired ? "expired" : "pending";
   return "run";
 }
 
@@ -263,6 +321,7 @@ function renderCard(u) {
   }
   if (u.error) foot.push(h("span", { class: "outcome err" }, `✗ ERROR: ${u.error}`));
   if (st === "pending") foot.push(h("span", { class: "outcome wait" }, "waiting for your answer"));
+  if (st === "expired") foot.push(h("span", { class: "outcome note" }, "no answer in time; dropped"));
   if (u.usage) foot.push(h("span", { class: "note" }, `model: ${u.usage.calls ?? "?"} call(s), ${(u.usage.prompt_tokens ?? 0) + (u.usage.completion_tokens ?? 0)} tokens`));
   if (foot.length) kids.push(h("div", { class: "foot" }, foot));
   u.el.replaceChildren(...kids);
@@ -349,17 +408,30 @@ function setConn(kind, text) {
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const q = `history=${CONFIG.HISTORY}${TOKEN ? `&token=${encodeURIComponent(TOKEN)}` : ""}`;
-  ws = new WebSocket(`${proto}://${location.host}/events?${q}`);
-  let replaying = true;
+  ws = new WebSocket(`${proto}://${location.host}/events?history=${CONFIG.HISTORY}`, wsProtocols());
+  // The server's first message is {"hello": {"replay": N}}: the next N messages are history, not live.
+  let greeted = false;
+  let replayLeft = 0;
   ws.onopen = () => {
     attempt = 0;
     setConn("up", "LIVE");
     resetTimeline(); // the server replays history; start clean so nothing doubles
-    setTimeout(() => { replaying = false; }, 400);
   };
   ws.onmessage = (m) => {
-    try { applyEvent(JSON.parse(m.data), !replaying); } catch (e) { console.error("bad event", e); }
+    let msg;
+    try { msg = JSON.parse(m.data); } catch (e) { console.error("bad event", e); return; }
+    if (!greeted) {
+      greeted = true;
+      if (msg && msg.hello) {
+        replayLeft = Math.max(0, Number(msg.hello.replay) || 0);
+        if (!replayLeft) finishReplay();
+        return;
+      }
+      finishReplay(); // no hello: treat everything as live
+    }
+    const live = replayLeft === 0;
+    try { applyEvent(msg, live); } catch (e) { console.error("bad event", e); }
+    if (!live && --replayLeft === 0) finishReplay();
   };
   ws.onclose = () => {
     const delay = CONFIG.BACKOFF_MS[Math.min(attempt, CONFIG.BACKOFF_MS.length - 1)];
@@ -371,10 +443,11 @@ function connect() {
 }
 
 function resetTimeline() {
-  state.utts.clear(); state.order = []; state.banner = null;
+  // The banner is kept: finishReplay() drops it unless the replayed history still ends on it.
+  state.utts.clear(); state.order = []; replayBanner = null;
   const tl = $("timeline");
   tl.replaceChildren(h("li", { id: "tl-empty", class: "empty" }, "Waiting for a command. Speak, or type one above."));
-  renderBanner(); renderStats();
+  renderStats();
 }
 
 // ---- command box --------------------------------------------------------------------------------
@@ -446,8 +519,21 @@ async function loadEval() {
   }
 }
 
+/** The brain's own confirm / question TTL, so banners expire when the brain stops listening for "yes". */
+async function loadServerConfig() {
+  try {
+    const r = await fetch("/health", { headers: authHeaders() });
+    const body = await r.json();
+    const ttl = Number(body.confirm_ttl_s);
+    if (r.ok && Number.isFinite(ttl) && ttl > 0) CONFIG.CONFIRM_TTL_MS = ttl * 1000;
+  } catch (e) {
+    console.warn("health check failed; banner TTL stays at the default", e);
+  }
+}
+
 // ---- boot ---------------------------------------------------------------------------------------
 $("energy-tip").textContent = CONFIG.ENERGY_ASSUMPTION;
+loadServerConfig();
 initCommandBox();
 $("ev-refresh").addEventListener("click", loadEval);
 loadEval();
