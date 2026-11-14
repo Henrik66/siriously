@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import functools
+import inspect
 import logging
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from brain.choice import parse_choice
 from brain.config import Settings
@@ -176,6 +178,18 @@ class _PendingAsk:
     created: float = field(default_factory=time.monotonic)
 
 
+@functools.cache
+def _accepts_timeout_cls(cls: type) -> bool:
+    try:
+        return "timeout_s" in inspect.signature(getattr(cls, "plan")).parameters  # noqa: B009
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def _accepts_timeout(planner: Planner) -> bool:
+    return _accepts_timeout_cls(type(planner))
+
+
 class Brain:
     # Flow steps that stop resolving after earlier steps ran are re-polled this many times.
     resolve_polls = _RESOLVE_POLLS
@@ -198,6 +212,7 @@ class Brain:
         self._flows = flows
         self._sink = sink
         self._settings = settings or Settings()
+        self._plan_s_ema = 0.0  # measured planner seconds (EMA); 0 = no data yet
         self._stop_lock = threading.Lock()
         self._stop_gen = 0  # bumped by every stop(); runs/queued utterances compare against it
         self._stop_wall = 0.0  # time.time() of the latest stop (speech-end clock of Utterance)
@@ -504,7 +519,7 @@ class Brain:
         target = step.target
         if self._planner is not None:
             hint = f'User chose item {target} "{label}". Use it as the target.'
-            plan = self._planner.plan(ask.text, snap, hint=hint)
+            plan = self._call_planner(run, ask.text, snap, hint=hint)
         else:
             action = Action.menu(target) if desc.kind == "menu" else Action.press(target)
             plan = Plan(snap.snapshot_id, (action,))
@@ -517,7 +532,7 @@ class Brain:
         planner = self._planner
         if planner is None or run.replans >= self._settings.max_replans:
             return "ok"
-        if run.deadline - time.monotonic() < self._settings.bonsai_timeout_s:
+        if not self._time_for_plan(run):
             return "ok"
         snap = self._await_navigation(run, base)
         if snap is None:
@@ -527,12 +542,40 @@ class Brain:
             f"Continuing the user's request. Already done: {summarize_steps(tuple(run.steps))}. "
             "Plan only the remaining steps; return no actions if nothing is left."
         )
-        plan = planner.plan(run.text, snap, hint=hint)
+        plan = self._call_planner(run, run.text, snap, hint=hint)
         self._emit_plan(run, plan, "continue", snap)
         if not plan.actions and plan.ask is None:
             return "ok"  # nothing left
         run.nav = False
         return self._start_plan(run, plan, snap)
+
+    # ----------------------------------------------------------------- planner budget
+
+    def _expected_plan_s(self) -> float:
+        """Seconds a planner call is expected to take: EMA of measured calls, floored."""
+        return max(self._settings.min_plan_budget_s, self._plan_s_ema * 1.25)
+
+    def _time_for_plan(self, run: _Run) -> bool:
+        """Enough of the utterance budget left for one more planner call (re-plan/continuation)?"""
+        return run.deadline - time.monotonic() >= self._expected_plan_s()
+
+    def _call_planner(
+        self, run: _Run, text: str, snap: UISnapshot, *, hint: str | None = None, error: str | None = None
+    ) -> Plan:
+        """planner.plan, capped to the remaining utterance budget when the planner supports it."""
+        planner = self._planner
+        if planner is None:
+            raise RuntimeError("no planner")
+        remaining = max(run.deadline - time.monotonic(), 0.5)
+        t = time.monotonic()
+        try:
+            if _accepts_timeout(planner):
+                plan_fn = cast(Callable[..., Plan], planner.plan)
+                return plan_fn(text, snap, hint=hint, error=error, timeout_s=remaining)
+            return planner.plan(text, snap, hint=hint, error=error)
+        finally:
+            took = time.monotonic() - t
+            self._plan_s_ema = took if self._plan_s_ema == 0.0 else 0.7 * self._plan_s_ema + 0.3 * took
 
     def _await_navigation(self, run: _Run, base: UISnapshot) -> UISnapshot | None:
         """Poll (~1 s) until the frontmost app/window differs from ``base``; None if it never does."""
@@ -657,7 +700,7 @@ class Brain:
             return "failed"
         if (stopped := self._gate(run)) is not None:
             return stopped
-        if run.deadline - time.monotonic() < self._settings.bonsai_timeout_s:
+        if not self._time_for_plan(run):
             self._emit("error", run.utt, {"message": f"{failure} (not enough time left to re-plan)"})
             return "failed"
         run.replans += 1
@@ -665,7 +708,7 @@ class Brain:
         error = failure
         if run.steps:
             error += f". Already done, do NOT repeat: {summarize_steps(tuple(run.steps))}"
-        plan = self._planner.plan(run.text, snap, error=error)
+        plan = self._call_planner(run, run.text, snap, error=error)
         self._emit_plan(run, plan, "replan", snap)
         return self._start_plan(run, plan, snap)
 
@@ -744,7 +787,7 @@ class Brain:
                 f"taught flow (remaining steps only): {summarize_steps(flow.steps[i:])}. "
                 f"Already done, do NOT repeat: {summarize_steps(flow.steps[:i])}."
             )
-        plan = self._planner.plan(flow.utterance or flow.name, snap, hint=hint)
+        plan = self._call_planner(run, flow.utterance or flow.name, snap, hint=hint)
         self._emit_plan(run, plan, "flow-fallback", snap)
         return self._start_plan(run, plan, snap)
 

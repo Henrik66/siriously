@@ -48,6 +48,9 @@ class Settings:
     flows_path: Path = field(default_factory=_flows_path)
     utterance_timeout_s: float = field(default_factory=_float("SIRIOUSLY_UTTERANCE_TIMEOUT_S", 8.0))
     max_replans: int = field(default_factory=_int("SIRIOUSLY_MAX_REPLANS", 2))
+    # minimum budget that must remain to start another planner call (re-plan / continuation);
+    # the real guard is max(this, 1.25 x measured planner time)
+    min_plan_budget_s: float = field(default_factory=_float("SIRIOUSLY_MIN_PLAN_BUDGET_S", 2.5))
     # a pending "are you sure?" expires after this long; a late "yes" is ignored
     confirm_ttl_s: float = field(default_factory=_float("SIRIOUSLY_CONFIRM_TTL_S", 20.0))
 

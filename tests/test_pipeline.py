@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from collections.abc import Callable
@@ -1151,3 +1152,55 @@ def test_press_on_button_without_change_still_a_miss() -> None:
     rig.executor.hook = lambda _s, _a: ActionResult(ok=True, changed=False)
     rig.say("go")
     assert "no effect" in str(rig.planner.calls[0]["error"])  # type: ignore[union-attr]
+
+
+class SlowTimedPlanner(FakePlanner):
+    """A planner that takes ``delay`` seconds and accepts a per-call ``timeout_s`` (like BonsaiPlanner)."""
+
+    def __init__(self, plans: list[Plan], delay: float) -> None:
+        super().__init__(plans)
+        self.delay = delay
+        self.timeouts: list[float | None] = []
+
+    def plan(  # type: ignore[override]
+        self,
+        text: str,
+        snapshot: UISnapshot,
+        *,
+        hint: str | None = None,
+        error: str | None = None,
+        timeout_s: float | None = None,
+    ) -> Plan:
+        self.timeouts.append(timeout_s)
+        time.sleep(self.delay)
+        return super().plan(text, snapshot, hint=hint, error=error)
+
+
+def test_continuation_runs_when_less_than_bonsai_timeout_left() -> None:
+    """Mac regression: 8 s budget, 6 s Bonsai timeout, a slow first plan must not block continuation."""
+    settings = dataclasses.replace(
+        Settings(), utterance_timeout_s=3.0, bonsai_timeout_s=6.0, min_plan_budget_s=0.5
+    )
+    planner = SlowTimedPlanner([Plan("s", (Action.press(5),))], delay=0.3)
+    rig = _fast(Rig(planner=planner, settings=settings))
+    rig.plan_route("dark mode", Plan("a", (Action.open_app("System Settings"),)), "planner")
+    _navigate_to(rig, SETTINGS_SNAP)
+    rig.say("dark mode")
+    assert rig.executor.log[-1] == ("s", Action.press(5))
+    assert rig.types()[-1] == "done"
+    # the continuation call is capped to what's left of the 3 s budget, not the 6 s Bonsai timeout
+    (timeout,) = planner.timeouts
+    assert timeout is not None and timeout <= 3.0
+
+
+def test_continuation_skipped_when_measured_plan_time_exceeds_budget() -> None:
+    """With planner calls measured at ~0.6 s, a 0.7 s budget leaves no room for a continuation."""
+    settings = dataclasses.replace(Settings(), utterance_timeout_s=0.7, min_plan_budget_s=0.1)
+    planner = SlowTimedPlanner([Plan("s", ())], delay=0.6)
+    rig = _fast(Rig(planner=planner, settings=settings))
+    rig.plan_route("dark mode", Plan("a", (Action.open_app("System Settings"),)), "planner")
+    rig.brain._plan_s_ema = 0.6  # 1.25 x 0.6 = 0.75 s expected > 0.7 s budget
+    _navigate_to(rig, SETTINGS_SNAP)
+    rig.say("dark mode")
+    assert planner.calls == []
+    assert rig.types()[-1] == "done"
