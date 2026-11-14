@@ -361,7 +361,7 @@
   fixture: safari
   utterance: search the web for cornell dining hours
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {any: [{op: menu, target: 114}, {op: press, target: 4}], optional: true}
         - {op: type, text: cornell dining hours, target: 4}
@@ -695,7 +695,7 @@
   fixture: safari
   utterance: look up cornell dining hours
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {any: [{op: menu, target: 114}, {op: press, target: 4}], optional: true}
         - {op: type, text: cornell dining hours, target: 4}

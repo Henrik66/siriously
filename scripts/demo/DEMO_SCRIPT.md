@@ -14,6 +14,8 @@ uv run python -m eval.demo_board                  # the scoreboard slide (newest
 
 `rehearse.py` exit codes: `0` = READY (every step passed), `1` = a step failed, `2` = some steps were
 skipped (usually because no model is running).
+Every demo line has a deterministic path, so the whole demo also runs with the model down
+(`rehearse.py --no-model` → READY 7/7); the model only matters for free-form commands.
 
 ---
 
@@ -47,7 +49,7 @@ skipped (usually because no model is running).
 | 3 | **"Call that standup."** | Overlay: *saved flow "standup"*. | Teaches the last successful sequence. |
 | 4 | **"Open Finder."** | Finder comes forward. | Walk away from Notes so the replay is visible. |
 | 5 | **"Standup."** | Notes jumps forward and a new *standup* note appears, instantly. | Replay of the taught flow: no model, no planning. |
-| 6 | *(if time)* **"Delete this note."** | Overlay asks to confirm. Nothing is deleted yet. | Safety: send/delete/quit always ask first. |
+| 6 | *(if time)* **"Delete this note."** | Overlay asks to confirm. Nothing is deleted yet. | Safety: send/delete/quit always ask first. Deterministic fast path (Edit › Delete), no model. |
 | 7 | **"Yes."** | The note is deleted. | |
 | 8 | *(close)* "That's the number we track:" + scoreboard | `eval.demo_board`: pass rate, holdout, latency per route. | Optional slide. |
 

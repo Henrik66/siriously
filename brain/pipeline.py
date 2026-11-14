@@ -153,6 +153,7 @@ class _Run:
     steps: list[FlowStep] = field(default_factory=list)
     gen: int = 0  # stop generation at handle() entry; a later stop() aborts this run
     usage: dict[str, float] = field(default_factory=dict)  # planner tokens/ms summed over the run
+    last_changed: bool = False  # the last executed action succeeded and changed the UI
     nav: bool = False  # the last executed burst ended on a navigation step (app/window changed)
 
 
@@ -482,6 +483,7 @@ class Brain:
             data["label"] = item.display  # human-readable target for overlays ("File › New Note")
         self._emit("action", run.utt, data)
         run.n_actions += 1
+        run.last_changed = failure is None and changed
         return result, failure
 
     def _emit_plan(self, run: _Run, plan: Plan, source: str, snap: UISnapshot) -> None:
@@ -585,8 +587,11 @@ class Brain:
             hint = (
                 f"The app {app} was just opened and is now frontmost. Plan only what the user asked for next."
             )
-            plan = self._call_planner(run, route.rest, snap, hint=hint)
+            raw = self._call_planner(run, route.rest, snap, hint=hint)
+            plan = self._drop_repeat(run, raw, snap)
             self._emit_plan(run, plan, "planner", snap)
+            if raw.actions and not plan.actions:
+                return "ok"
         else:
             self._emit_plan(run, plan, rest.kind, snap)
         return self._start_plan(run, plan, snap)
@@ -618,9 +623,9 @@ class Brain:
         run.replans += 1
         hint = (
             f"Continuing the user's request. Already done: {summarize_steps(tuple(run.steps))}. "
-            "Plan only the remaining steps; return no actions if nothing is left."
+            "Plan only the remaining steps; return no actions if nothing is left." + self._already_open(run)
         )
-        plan = self._call_planner(run, run.text, snap, hint=hint)
+        plan = self._drop_repeat(run, self._call_planner(run, run.text, snap, hint=hint), snap)
         self._emit_plan(run, plan, "continue", snap)
         if not plan.actions and plan.ask is None:
             return "ok"  # nothing left
@@ -760,6 +765,50 @@ class Brain:
                 cur, sid = new, new.snapshot_id
         return "ok"
 
+    @staticmethod
+    def _is_repeat(run: _Run, action: Action, snap: UISnapshot) -> bool:
+        """Does ``action`` duplicate one already executed in this run?
+
+        Targeted actions and open_app match any earlier step (same op + descriptor / app): the
+        planner re-choosing an already-open sidebar row or menu is never useful. keys/type/scroll
+        only match the immediately previous step, and only if it changed the UI.
+        """
+        if action.target is not None:
+            desc = describe(action, snap)
+            return desc is not None and any(
+                st.action.op == action.op and st.target == desc for st in run.steps
+            )
+        if action.op == "open_app":
+            return any(st.action.op == "open_app" and st.action.app == action.app for st in run.steps)
+        if not run.steps or not run.last_changed:
+            return False
+        prev = run.steps[-1].action
+        key = (action.op, action.keys, action.text, action.direction)
+        return prev.target is None and key == (prev.op, prev.keys, prev.text, prev.direction)
+
+    @classmethod
+    def _drop_repeat(cls, run: _Run, plan: Plan, snap: UISnapshot) -> Plan:
+        """Drop leading actions that repeat what this run already did (View > Appearance twice).
+
+        Such a repeat would be reported as "no effect" and burn the re-plan budget; skipping it lets
+        the remaining steps (if any) run, and an emptied plan means "nothing left".
+        """
+        actions = list(plan.actions)
+        while actions and cls._is_repeat(run, actions[0], snap):
+            logger.info("dropping repeated action %s", actions[0].op)
+            actions.pop(0)
+        return replace(plan, actions=tuple(actions)) if len(actions) != len(plan.actions) else plan
+
+    @staticmethod
+    def _already_open(run: _Run) -> str:
+        names = [
+            " > ".join(st.target.path) if st.target.path else st.target.label
+            for st in run.steps
+            if st.target is not None and st.action.op in ("press", "menu")
+        ]
+        names = [n for n in dict.fromkeys(names) if n]
+        return "".join(f' Do NOT select "{n}" again, it is already open.' for n in names)
+
     def _is_navigation(self, action: Action, before: UISnapshot, after: UISnapshot | None) -> bool:
         if action.op == "open_app":
             return True
@@ -787,8 +836,12 @@ class Brain:
         error = failure
         if run.steps:
             error += f". Already done, do NOT repeat: {summarize_steps(tuple(run.steps))}"
-        plan = self._call_planner(run, run.text, snap, error=error)
+            error += self._already_open(run)
+        raw = self._call_planner(run, run.text, snap, error=error)
+        plan = self._drop_repeat(run, raw, snap)
         self._emit_plan(run, plan, "replan", snap)
+        if raw.actions and not plan.actions:
+            return "ok"  # the planner only repeated what already worked: nothing left
         return self._start_plan(run, plan, snap)
 
     # -------------------------------------------------------------------- flows

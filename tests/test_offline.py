@@ -169,9 +169,7 @@ def test_demo_rehearsal_offline(network_attempts: list[str]) -> None:
     finally:
         stage.close()
     assert network_attempts == []
-    assert [r.status for r in results if r.step.key in ("task", "hijack", "teach", "away", "replay")] == [
-        "PASS"
-    ] * 5
+    assert [r.status for r in results] == ["PASS"] * len(results)  # the whole demo, no model, no network
 
 
 def test_default_endpoints_are_loopback() -> None:

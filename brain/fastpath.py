@@ -37,6 +37,28 @@ _CREATE = re.compile(
 )
 _NOUN_CUTOFF = 92.0
 _SKIP_NOUNS = frozenset({"tab", "window"})
+_DESTROY = re.compile(
+    r"^(?:delete|remove|trash|get rid of|throw away|discard)\s+"
+    r"(?:this|the|that|current|selected)(?:\s+(?:current|selected))?\s+([a-z]+(?:\s[a-z]+)?)$"
+)
+_NOT_AN_OBJECT = frozenset(
+    {"last", "first", "next", "previous", "all", "every", "entire", "whole", "rest", "above", "below"}
+)
+_SEARCH = re.compile(r"^(search the web for|search for|look up|google)\s+(.+)$", re.IGNORECASE)
+_DOMAIN = re.compile(
+    r"^(?:go to|open|visit)\s+(?:the\s+)?((?:https?://)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:/\S*)?)$",
+    re.IGNORECASE,
+)
+BROWSER_NAMES = frozenset({"safari", "google chrome", "chrome", "firefox", "arc", "microsoft edge", "edge"})
+BROWSER_BUNDLES = frozenset(
+    {
+        "com.apple.safari",
+        "com.google.chrome",
+        "org.mozilla.firefox",
+        "company.thebrowser.browser",
+        "com.microsoft.edgemac",
+    }
+)
 _PRESS = re.compile(r"^(?:press|hit|push|tap)\s+(.+)$")
 _CLICK = re.compile(r"^(?:click|press|hit|tap|push)\s+(?:on\s+)?(?:the\s+)?(.+?)(?:\s+button)?$")
 _SCROLL = re.compile(r"^scroll\s+(up|down)(?:\s+(a lot|a little|a bit|lot|little|bit|way))?$")
@@ -162,6 +184,18 @@ def _shortcut_taken(std: _Std, snap: UISnapshot) -> bool:
     )
 
 
+# Things a person deletes as a whole. The generic tiers (Move to Trash, Edit > Delete) only fire for
+# these, so "remove this formatting" / "delete this line" go to the planner instead of deleting
+# the current selection. An exact "Delete <Noun>" menu leaf still matches any noun.
+_OBJECT_NOUNS = frozenset(
+    {
+        "note", "file", "folder", "item", "document", "doc", "event", "message", "email", "mail",
+        "conversation", "chat", "photo", "picture", "image", "page", "reminder", "contact",
+        "entry", "card", "draft", "attachment", "bookmark", "recording", "memo",
+    }
+)  # fmt: skip
+
+
 class FastPath:
     """Pattern matcher over the utterance and the current snapshot. No model."""
 
@@ -181,7 +215,17 @@ class FastPath:
         created = self._create(text, snapshot)
         if created is not None:
             return created
-        for fn in (self._std, self._scroll, self._keys, self._open_app, self._button, self._menu):
+        if (web := self._web(snapshot, text)) is not None:
+            return web
+        for fn in (
+            self._destroy,
+            self._std,
+            self._scroll,
+            self._keys,
+            self._open_app,
+            self._button,
+            self._menu,
+        ):
             plan = fn(t, snapshot)
             if plan is not None:
                 return plan
@@ -190,6 +234,58 @@ class FastPath:
     @staticmethod
     def _plan(snap: UISnapshot, action: Action, say: str) -> Plan:
         return Plan(snapshot_id=snap.snapshot_id, actions=(action,), say=say)
+
+    def _destroy(self, t: str, snap: UISnapshot) -> Plan | None:
+        """ "delete this note" -> the one enabled Delete <Noun> / Move to Trash / Edit > Delete leaf.
+
+        Requires a demonstrative/article, so "delete everything" never matches. The pipeline's
+        safety gate still asks for confirmation before the menu action runs.
+        """
+        m = _DESTROY.match(t)
+        if not m:
+            return None
+        words = m.group(1).split()
+        if any(w in _NOT_AN_OBJECT for w in words):
+            return None
+        noun = " ".join(words)
+        singular = noun[:-3] + "y" if noun.endswith("ies") else noun.removesuffix("s")
+        leaves = [(i, normalize(i.name)) for i in snap.menus if i.enabled and i.path]
+        tiers = (
+            [i for i, leaf in leaves if leaf in (f"delete {noun}", f"delete {singular}")],
+            [i for i, leaf in leaves if leaf == "move to trash" and singular in _OBJECT_NOUNS],
+            [
+                i
+                for i, leaf in leaves
+                if leaf == "delete" and normalize(i.path[0]) == "edit" and singular in _OBJECT_NOUNS
+            ],
+        )
+        for hits in tiers:
+            if hits:
+                if len({i.path for i in hits}) != 1:
+                    return None
+                return self._plan(snap, Action.menu(hits[0].id), hits[0].name)
+        return None
+
+    def _web(self, snap: UISnapshot, text: str) -> Plan | None:
+        """In a browser: "search for X" / "go to github.com" -> focus the address bar, type, return."""
+        if (
+            normalize(snap.app.name) not in BROWSER_NAMES
+            and snap.app.bundle_id.lower() not in BROWSER_BUNDLES
+        ):
+            return None
+        raw = text.strip().rstrip(".!?,;").strip()
+        if m := _SEARCH.match(raw):
+            query = m.group(2).strip().strip("\"'“”").strip()
+            if not query or (m.group(1).lower() == "google" and self._resolve_app(normalize(query))):
+                return None  # "google chrome" is an app name, not a query
+        elif m := _DOMAIN.match(raw):
+            query = m.group(1)
+        else:
+            return None
+        bar = [i for i in snap.menus if i.enabled and i.path and normalize(i.name) == "open location"]
+        focus = Action.menu(bar[0].id) if len(bar) == 1 else Action.key("cmd+l")
+        actions = (focus, Action.type_text(query), Action.key("return"))
+        return Plan(snapshot_id=snap.snapshot_id, actions=actions, say=f"Searching {query}")
 
     def _std(self, t: str, snap: UISnapshot) -> Plan | None:
         phrase = " ".join(w for w in t.split() if w not in _DETERMINERS)

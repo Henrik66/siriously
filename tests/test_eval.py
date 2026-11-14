@@ -918,7 +918,8 @@ def test_rehearsal_full_demo_with_stub_planner() -> None:
     assert data["steps"][1]["events"] == ["rejected"] and data["steps"][5]["events"][-1] == "confirm"
 
 
-def test_rehearsal_without_model_skips_model_steps() -> None:
+def test_rehearsal_whole_demo_runs_without_model() -> None:
+    """Every demo line has a deterministic path now: the demo needs no model at all."""
     from eval.rehearse import FixtureStage, exit_code, rehearse
 
     stage = FixtureStage(None)
@@ -926,8 +927,25 @@ def test_rehearsal_without_model_skips_model_steps() -> None:
         results = rehearse(stage, has_planner=False)
     finally:
         stage.close()
-    by_key = {r.step.key: r.status for r in results}
-    assert by_key["danger"] == "SKIP" and by_key["confirm"] == "SKIP" and by_key["replay"] == "PASS"
+    assert [r.status for r in results] == ["PASS"] * 7, [(r.step.key, r.problems) for r in results]
+    assert exit_code(results) == 0
+
+
+def test_rehearsal_model_only_step_skips_without_model() -> None:
+    from eval.rehearse import DemoStep, FixtureStage, exit_code, rehearse
+
+    steps = [
+        DemoStep("dark", "Turn on dark mode", "needs the planner", routes=("planner",), acts=True),
+        DemoStep("after", "Yes", "depends on the model step", routes=("control",), needs="dark"),
+        DemoStep("away", "Open Notes", "fast path still runs", routes=("fastpath",), acts=True, app="Notes"),
+    ]
+    stage = FixtureStage(None)
+    try:
+        results = rehearse(stage, steps, has_planner=False)
+    finally:
+        stage.close()
+    assert [r.status for r in results] == ["SKIP", "SKIP", "PASS"]
+    assert "no model" in results[0].problems[0] and "needs step 'dark'" in results[1].problems[0]
     assert exit_code(results) == 2
 
 
@@ -1036,5 +1054,5 @@ def test_rehearsal_live_unreachable(capsys: pytest.CaptureFixture[str]) -> None:
 def test_rehearsal_cli_no_model(capsys: pytest.CaptureFixture[str]) -> None:
     from eval import rehearse as rh
 
-    assert rh.main(["--no-model"]) == 2
-    assert "NOT READY: 5 pass, 0 fail, 2 skip" in capsys.readouterr().out
+    assert rh.main(["--no-model"]) == 0
+    assert "READY: 7 pass, 0 fail, 0 skip" in capsys.readouterr().out

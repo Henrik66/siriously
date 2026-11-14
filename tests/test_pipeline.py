@@ -893,8 +893,8 @@ def test_continuation_empty_plan_is_done() -> None:
 
 
 def test_continuation_bounded_by_max_replans() -> None:
-    nav = Plan("s", (Action.open_app("A"),))
-    rig = _fast(Rig(planner=FakePlanner([nav, nav, nav, nav])))
+    plans = [Plan("s", (Action.open_app(name),)) for name in "BCDE"]  # distinct: a repeat is dropped
+    rig = _fast(Rig(planner=FakePlanner(plans)))
     rig.plan_route("go", Plan("a", (Action.open_app("A"),)), "planner")
     n = 0
 
@@ -1221,3 +1221,118 @@ def test_plan_and_action_events_carry_target_names() -> None:
     assert "New Note" in " ".join(plan.data["targets"].values())
     action = next(e for e in sink.events if e.type == "action")
     assert action.data["label"].endswith("New Note")
+
+
+# ---- loop guard: a continuation/replan must not repeat the action that just succeeded
+
+
+def _view_snap(sid: str, window: str, appearance: int) -> UISnapshot:
+    return UISnapshot(
+        sid,
+        AppInfo("Settings", "com.apple.systempreferences"),
+        window=window,
+        items=(UIItem(appearance, "menu", "menuitem", "Appearance", path=("View", "Appearance")),),
+    )
+
+
+def _view_rig(plans: list[Plan]) -> Rig:
+    rig = _fast(Rig(planner=FakePlanner(plans)))
+    rig.provider.snap = _view_snap("v1", "General", 20)
+    after = _view_snap("v2", "Appearance", 30)
+
+    def hook(_s: str, a: Action) -> ActionResult | None:
+        rig.provider.snap = after
+        return ActionResult(ok=True, changed=True, snapshot=None)
+
+    rig.executor.hook = hook
+    rig.plan_route("make it dark", Plan("v1", (Action.menu(20),)), "planner")
+    return rig
+
+
+def test_continuation_skips_repeat_of_last_action() -> None:
+    rig = _view_rig([Plan("v2", (Action.menu(30),))])  # planner picks View > Appearance again
+    rig.say("make it dark")
+    assert rig.executor.actions == [Action.menu(20)]
+    assert rig.types()[-1] == "done"
+    assert not rig.events("error")
+
+
+def test_continuation_keeps_remaining_actions_after_dropped_repeat() -> None:
+    rig = _view_rig([Plan("v2", (Action.menu(30), Action.key("cmd+d")))])
+    rig.say("make it dark")
+    assert rig.executor.actions == [Action.menu(20), Action.key("cmd+d")]
+
+
+def test_continuation_different_action_still_runs() -> None:
+    other = UISnapshot(
+        "v2",
+        AppInfo("Settings", "com.apple.systempreferences"),
+        window="Appearance",
+        items=(UIItem(31, "menu", "menuitem", "Zoom", path=("View", "Zoom")),),
+    )
+    rig = _view_rig([Plan("v2", (Action.menu(31),))])
+    rig.executor.hook = lambda _s, _a: (setattr(rig.provider, "snap", other), None)[1]
+    rig.say("make it dark")
+    assert rig.executor.actions == [Action.menu(20), Action.menu(31)]
+
+
+# ---- destructive template through the real router: confirm first, then execute
+
+
+def test_remove_this_note_confirms_then_executes() -> None:
+    from brain.fastpath import FastPath
+    from brain.router import Router
+
+    notes = UISnapshot(
+        "n1",
+        AppInfo("Notes", BUNDLE),
+        items=(
+            UIItem(2, "element", "button", "Delete"),
+            UIItem(137, "menu", "menuitem", "Delete", path=("Edit", "Delete"), shortcut="cmd+delete"),
+        ),
+    )
+    provider, flows, sink = FakeProvider(notes), FlowStore(), ListSink()
+    ex = FakeExecutor(provider)
+    brain = Brain(provider, ex, Router(FastPath(["Notes"]), flows, None), None, flows, sink)
+    brain.handle(Utterance(id="u1", text="remove this note"))
+    assert [e.type for e in sink.events][-2:] == ["plan", "confirm"]
+    assert ex.log == []
+    brain.handle(Utterance(id="u2", text="yes"))
+    assert ex.actions == [Action.menu(137)]
+    brain.handle(Utterance(id="u3", text="delete everything"))
+    assert ex.actions == [Action.menu(137)]  # no router match, no planner: nothing runs
+    assert sink.events[-1].type == "error"
+
+
+def test_continuation_never_rechooses_already_open_pane() -> None:
+    """open settings -> Appearance row pressed -> planner re-picks the row, then Dark: only Dark runs."""
+    app = AppInfo("System Settings", "com.apple.systempreferences")
+
+    def pane(sid: str, window: str) -> UISnapshot:
+        return UISnapshot(
+            sid,
+            app,
+            window=window,
+            items=(
+                UIItem(15, "element", "row", "Appearance"),
+                UIItem(42, "element", "button", "Dark"),
+            ),
+        )
+
+    plans = [Plan("s1", (Action.press(15),)), Plan("s2", (Action.press(15), Action.press(42)))]
+    rig = _fast(Rig(planner=FakePlanner(plans)))
+    rig.provider.snap = UISnapshot("s0", AppInfo("Finder", "com.apple.finder"))
+    rig.plan_route("dark", Plan("s0", (Action.open_app("System Settings"),)), "planner")
+
+    def hook(_s: str, a: Action) -> ActionResult | None:
+        if a.op == "open_app":
+            rig.provider.snap = pane("s1", "General")
+        elif a.target == 15:
+            rig.provider.snap = pane("s2", "Appearance")
+        return None
+
+    rig.executor.hook = hook
+    rig.say("dark")
+    assert rig.executor.actions == [Action.open_app("System Settings"), Action.press(15), Action.press(42)]
+    assert 'Do NOT select "Appearance" again' in str(rig.planner.calls[1]["hint"])  # type: ignore[union-attr]
+    assert rig.types()[-1] == "done" and not rig.events("error")
