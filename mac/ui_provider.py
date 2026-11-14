@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+import subprocess
 import sys
 import time
 import uuid
@@ -157,16 +159,32 @@ class MacUIProvider:
 
     # ---------------------------------------------------------------- public API (PRD §4.5)
     @staticmethod
+    def _front_pid_launchservices() -> int | None:
+        """Front app per LaunchServices (`lsappinfo`), i.e. the app that receives keystrokes. ~5 ms."""
+        try:
+            asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=1).stdout.strip()
+            out = subprocess.run(["lsappinfo", "info", "-only", "pid", asn], capture_output=True, text=True,
+                                 timeout=1).stdout
+            m = re.search(r'"pid"=(\d+)', out)
+            return int(m.group(1)) if m else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    @staticmethod
     def frontmost_app():
-        """Live frontmost app. NSWorkspace.frontmostApplication() goes stale in a CLI process without a
-        run loop, so ask the Accessibility API (system-wide focused application) instead."""
-        focused_app = _attr(AX.AXUIElementCreateSystemWide(), "AXFocusedApplication")
-        if focused_app is not None:
-            err, pid = AX.AXUIElementGetPid(focused_app, None)
-            if err == 0:
-                app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-                if app is not None:
-                    return app
+        """Live frontmost app. NSWorkspace.frontmostApplication() goes stale in a process without a main run
+        loop, and the system-wide AXFocusedApplication fails with -25204 from Terminal-hosted processes on
+        macOS 26, so ask LaunchServices first, then Accessibility, then NSWorkspace."""
+        pid = MacUIProvider._front_pid_launchservices()
+        if pid is None:
+            focused_app = _attr(AX.AXUIElementCreateSystemWide(), "AXFocusedApplication")
+            if focused_app is not None:
+                err, p = AX.AXUIElementGetPid(focused_app, None)
+                pid = p if err == 0 else None
+        if pid is not None:
+            app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if app is not None:
+                return app
         return AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
 
     @staticmethod
@@ -182,7 +200,6 @@ class MacUIProvider:
         app through the Accessibility API (AXFrontmost), which trusted processes may do.
         The pid is looked up by bundle id: NSWorkspace.runningApplications() is a KVO snapshot that only
         refreshes on the main run loop, so off the main thread it never shows a freshly launched app."""
-        import subprocess
         subprocess.run(["open", "-a", name], check=True, capture_output=True)
         bid = MacUIProvider._bundle_id(name)
         t0 = time.time()

@@ -595,11 +595,10 @@ def selftest():
             import subprocess
             subprocess.run(["osascript", "-e", 'tell application "TextEdit" to close every document saving no'],
                            capture_output=True)
-        for name in ("TextEdit", "Calculator"):
-            if name not in running:
-                for a in AppKit.NSWorkspace.sharedWorkspace().runningApplications():
-                    if a.localizedName() == name:
-                        a.terminate()
+        for name, bid in (("TextEdit", "com.apple.TextEdit"), ("Calculator", "com.apple.calculator")):
+            if name not in running:      # by bundle id: the NSWorkspace list is stale off the main run loop
+                for a in AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bid):
+                    a.terminate()
         if origin is not None:
             MacUIProvider.activate(origin.localizedName())
     passed = sum(ok for _, ok in results)
