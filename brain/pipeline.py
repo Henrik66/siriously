@@ -31,6 +31,7 @@ from brain.contracts import (
     UISnapshot,
     Utterance,
 )
+from brain.control import normalize
 from brain.flows import Flow, FlowStep, FlowStore, resolve_step
 from brain.router import is_filler
 from brain.safety import confirm_reason, normalize_keys
@@ -151,6 +152,7 @@ class _Run:
     n_actions: int = 0
     steps: list[FlowStep] = field(default_factory=list)
     gen: int = 0  # stop generation at handle() entry; a later stop() aborts this run
+    usage: dict[str, float] = field(default_factory=dict)  # planner tokens/ms summed over the run
     nav: bool = False  # the last executed burst ended on a navigation step (app/window changed)
 
 
@@ -343,6 +345,8 @@ class Brain:
             data["flow"] = route.flow
         self._emit("route", utt, data)
         run.kind = route.kind
+        if route.kind in ("planner", "dictation") and route.plan is not None:
+            self._add_usage(run)  # the router already called the planner
         if route.kind == "control":
             self._handle_control(run, route, t0)
         elif route.kind == "flow" and route.teach:
@@ -351,7 +355,10 @@ class Brain:
             self._finish(run, self._start_flow(run, route, snapshot), t0)
         elif route.kind in _PLAN_KINDS and route.plan is not None:
             self._emit_plan(run, route.plan, route.kind, snapshot)
-            self._finish(run, self._start_plan(run, route.plan, snapshot), t0)
+            outcome = self._start_plan(run, route.plan, snapshot)
+            if outcome == "ok" and route.rest:
+                outcome = self._run_rest(run, route, snapshot)
+            self._finish(run, outcome, t0)
         else:
             self._emit("error", utt, {"message": route.reason or "no action"})
         return route
@@ -361,7 +368,18 @@ class Brain:
             return
         if run.steps:
             self._last = (tuple(run.steps), run.text)
-        self._emit("done", run.utt, self._done_data(run.kind, run.n_actions, t0))
+        data = self._done_data(run.kind, run.n_actions, t0)
+        if run.usage.get("calls"):
+            data["usage"] = dict(run.usage)
+        self._emit("done", run.utt, data)
+
+    def _add_usage(self, run: _Run) -> None:
+        """Fold the planner's ``last_stats`` (most recent call) into the run's usage totals."""
+        stats = getattr(self._planner, "last_stats", None) or {}
+        u = run.usage
+        for key in ("prompt_tokens", "cached_tokens", "completion_tokens", "ms"):
+            u[key] = u.get(key, 0) + float(stats.get(key, 0) or 0)
+        u["calls"] = u.get("calls", 0) + 1
 
     # ----------------------------------------------------------------- control
 
@@ -527,6 +545,59 @@ class Brain:
         self._finish(run, self._start_plan(run, plan, snap), t0)
         return route
 
+    def _route_rest(self, text: str, snap: UISnapshot) -> Route:
+        """Route compound tail text: never control/teach/flow; planner left to the caller."""
+        route_rest = getattr(self._router, "route_rest", None)
+        if callable(route_rest):
+            return cast(Route, route_rest(text, snap, use_planner=False))
+        route = self._router.route(text, snap)
+        if route.kind in ("fastpath", "planner", "dictation") and route.plan is not None:
+            return route
+        return Route(kind="planner", reason="rest")
+
+    def _run_rest(self, run: _Run, route: Route, base: UISnapshot) -> Outcome:
+        """Second half of "open X and <rest>": route and run ``rest`` in the same utterance run."""
+        assert route.plan is not None and route.rest is not None
+        app = next((a.app for a in route.plan.actions if a.op == "open_app" and a.app), "")
+        snap = self._await_app(run, base, app)
+        if snap is None:
+            self._emit("error", run.utt, {"message": f"{app or 'app'} did not come to the front"})
+            return "failed"
+        rest = self._route_rest(route.rest, snap)
+        data: JSON = {"kind": rest.kind, "reason": rest.reason, "ms": rest.ms, "source": "rest"}
+        self._emit("route", run.utt, data)
+        run.kind, run.nav = rest.kind, False
+        plan = rest.plan
+        if plan is None:
+            if self._planner is None:
+                self._emit("error", run.utt, {"message": "no planner for the rest of the request"})
+                return "failed"
+            if not self._time_for_plan(run):
+                self._emit("error", run.utt, {"message": "not enough time left to plan the rest"})
+                return "failed"
+            hint = (
+                f"The app {app} was just opened and is now frontmost. Plan only what the user asked for next."
+            )
+            plan = self._call_planner(run, route.rest, snap, hint=hint)
+            self._emit_plan(run, plan, "planner", snap)
+        else:
+            self._emit_plan(run, plan, rest.kind, snap)
+        return self._start_plan(run, plan, snap)
+
+    def _await_app(self, run: _Run, base: UISnapshot, app: str) -> UISnapshot | None:
+        """Fresh snapshot once ``app`` is frontmost (already frontmost is fine); None if it never is."""
+        want = normalize(app)
+
+        def is_app(s: UISnapshot) -> bool:
+            have = normalize(s.app.name)
+            return not want or have == want or want in have or have in want
+
+        snap = self._provider.snapshot()
+        if is_app(snap):
+            return snap
+        moved = self._await_navigation(run, base)
+        return moved if moved is not None and is_app(moved) else None
+
     def _continue(self, run: _Run, base: UISnapshot) -> Outcome:
         """The burst ended by navigating (open_app / app or window changed): plan the rest there."""
         planner = self._planner
@@ -575,6 +646,7 @@ class Brain:
             return planner.plan(text, snap, hint=hint, error=error)
         finally:
             took = time.monotonic() - t
+            self._add_usage(run)
             self._plan_s_ema = took if self._plan_s_ema == 0.0 else 0.7 * self._plan_s_ema + 0.3 * took
 
     def _await_navigation(self, run: _Run, base: UISnapshot) -> UISnapshot | None:

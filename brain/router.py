@@ -11,7 +11,7 @@ import time
 from dataclasses import replace
 from typing import Protocol
 
-from brain.contracts import Planner, Route, UISnapshot
+from brain.contracts import Action, Plan, Planner, Route, UISnapshot
 from brain.control import fold, normalize, parse_control
 from brain.fastpath import FastPath
 from brain.flows import parse_teach
@@ -38,6 +38,13 @@ class FlowMatcher(Protocol):
     def names(self) -> list[str]: ...
 
     def match(self, text: str) -> str | None: ...
+
+
+_COMPOUND = re.compile(
+    r"^(?:open|launch|start|switch to|go to)\s+(?:the\s+)?(.+?)(?:\s+(?:app|application))?"
+    r"\s*,?\s+(?:and then|and|then)\s+(.+)$",
+    re.IGNORECASE,
+)
 
 
 def _parse_teach(text: str) -> str | None:
@@ -68,10 +75,42 @@ class Router:
         flow = self.flows.match(text)
         if flow:
             return Route(kind="flow", flow=flow)
+        compound = self._compound(text, snapshot)
+        if compound is not None:
+            return compound
         plan = self.fastpath.match(text, snapshot)
         if plan is not None:
             return Route(kind="fastpath", plan=plan)
         return self._plan(text, snapshot)
+
+    def route_rest(self, text: str, snapshot: UISnapshot, *, use_planner: bool = True) -> Route:
+        """Route the tail of a compound utterance: fast path, then planner. No control/teach/flows.
+
+        With ``use_planner=False`` a fast-path miss returns ``Route(kind="planner")`` without a plan so
+        the caller can run the (budget-capped) planner itself.
+        """
+        t0 = time.perf_counter()
+        plan = self.fastpath.match(text, snapshot)
+        if plan is not None:
+            route = Route(kind="fastpath", plan=plan)
+        elif use_planner:
+            route = self._plan(text, snapshot)
+        else:
+            route = Route(kind="planner", reason="rest")
+        return _timed(route, t0)
+
+    def _compound(self, text: str, snapshot: UISnapshot) -> Route | None:
+        m = _COMPOUND.match(text.strip())
+        if not m:
+            return None
+        app = self.fastpath.resolve_app(m.group(1))
+        rest = m.group(2).strip()
+        if app is None or not rest:
+            return None
+        if normalize(snapshot.app.name) == normalize(app):
+            return self.route_rest(rest, snapshot)  # already frontmost: no open_app
+        plan = Plan(snapshot.snapshot_id, (Action.open_app(app),), say=f"Opening {app}")
+        return Route(kind="fastpath", plan=plan, rest=rest, reason="compound")
 
     def _plan(self, text: str, snapshot: UISnapshot) -> Route:
         if self.planner is None:

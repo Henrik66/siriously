@@ -269,9 +269,8 @@ class TestMenuByName:
     @pytest.mark.parametrize(
         "text",
         [
-            "new note called standup", "new note and type hello", "new note then scroll down",
+            "new note and type hello", "new note then scroll down",
             "new note with the title standup", "", "   ", "what is the weather like in San Francisco today",
-            "new folder named taxes",
         ],
     )  # fmt: skip
     def test_payload_and_multiclause(self, fp: FastPath, text: str) -> None:

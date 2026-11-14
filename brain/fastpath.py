@@ -30,6 +30,13 @@ _CLAUSE = re.compile(r"\b(?:and|then|also|after that|afterwards)\b")
 _OPEN = re.compile(
     r"^(?:open|launch|start|switch to|go to|bring up)\s+(?:the\s+)?(.+?)(?:\s+(?:app|application))?$"
 )
+_CREATE = re.compile(
+    r"^(?:(?:start|create|make|add)\s+(?:(?:a|an)\s+)?(?:new\s+)?|new\s+)"
+    r"([a-z]+(?:\s[a-z]+)?)\s+(?:called|named|titled)\s+(.+)$",
+    re.IGNORECASE,
+)
+_NOUN_CUTOFF = 92.0
+_SKIP_NOUNS = frozenset({"tab", "window"})
 _PRESS = re.compile(r"^(?:press|hit|push|tap)\s+(.+)$")
 _CLICK = re.compile(r"^(?:click|press|hit|tap|push)\s+(?:on\s+)?(?:the\s+)?(.+?)(?:\s+button)?$")
 _SCROLL = re.compile(r"^scroll\s+(up|down)(?:\s+(a lot|a little|a bit|lot|little|bit|way))?$")
@@ -171,6 +178,9 @@ class FastPath:
         t = normalize(text)
         if not t or len(t.split()) > MAX_WORDS or _CLAUSE.search(t):
             return None
+        created = self._create(text, snapshot)
+        if created is not None:
+            return created
         for fn in (self._std, self._scroll, self._keys, self._open_app, self._button, self._menu):
             plan = fn(t, snapshot)
             if plan is not None:
@@ -211,6 +221,36 @@ class FastPath:
         m = _PRESS.match(t)
         keys = parse_keys(m.group(1)) if m else None
         return self._plan(snap, Action.key(keys), f"Pressing {keys}") if keys else None
+
+    def resolve_app(self, spoken: str) -> str | None:
+        """Installed app name for a spoken name (aliases + fuzzy), or None."""
+        return self._resolve_app(normalize(spoken))
+
+    def _create(self, text: str, snap: UISnapshot) -> Plan | None:
+        """ "create a folder called demo" -> menu(New Folder), type(demo), return."""
+        m = _CREATE.match(text.strip())
+        if not m:
+            return None
+        noun = normalize(m.group(1))
+        name = m.group(2).strip().strip("\"'“”").rstrip(".!?,;").strip()
+        if not noun or not name or noun.split()[-1].rstrip("s") in _SKIP_NOUNS:
+            return None
+        singular = noun[:-3] + "y" if noun.endswith("ies") else noun.removesuffix("s")
+        scored: list[tuple[float, UIItem]] = []
+        for item in snap.menus:
+            leaf = normalize(item.name)
+            if not item.enabled or not item.path or not leaf.startswith("new "):
+                continue
+            kind = leaf[4:]
+            if any(w in _SKIP_NOUNS for w in kind.split()) and kind != singular:
+                continue
+            scored.append((max(fuzz.ratio(singular, kind), fuzz.ratio(noun, kind)), item))
+        scored = sorted((x for x in scored if x[0] >= _NOUN_CUTOFF), key=lambda x: -x[0])
+        if not scored or any(o.path != scored[0][1].path and sc == scored[0][0] for sc, o in scored[1:]):
+            return None
+        item = scored[0][1]
+        actions = (Action.menu(item.id), Action.type_text(name), Action.key("return"))
+        return Plan(snapshot_id=snap.snapshot_id, actions=actions, say=f"{item.name}: {name}")
 
     def _resolve_app(self, spoken: str) -> str | None:
         spoken = normalize(APP_ALIASES.get(spoken, spoken))

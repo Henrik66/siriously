@@ -96,9 +96,10 @@ def test_fastpath() -> None:
 
 def test_planner_fallback() -> None:
     p = FakePlanner()
-    r = make(p).route("open notes and start a note called standup", SNAP)
+    text = "open zzzqq and start a note called standup"  # unknown app: no compound split
+    r = make(p).route(text, SNAP)
     assert r.kind == "planner" and r.plan is p.plan_
-    assert p.calls == ["open notes and start a note called standup"]
+    assert p.calls == [text]
 
 
 def test_dictation() -> None:
