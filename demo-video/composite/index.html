@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Siriously composite</title>
+<!-- One final 1920x1080 frame: the flat screen frame on a tilted plane in a black void, a blurred copy masked
+     to the top and bottom (tilt-shift band), a hard vignette, faint grain and the fade between shots.
+     window.compose(params) sets everything for one frame; the knobs come from ../config.mjs. -->
+<style>
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+  .layer { position: absolute; inset: 0; perspective: 1400px; perspective-origin: 50% 50%; }
+  .plane { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 50% 50%; }
+  .plane img { width: 1920px; height: 1080px; display: block; border-radius: 26px;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 60px 200px rgba(0,0,0,0.8); }
+  #blurwrap { position: absolute; inset: 0; }
+  #vignette, #fade, #grain { position: absolute; inset: 0; pointer-events: none; }
+  #grain { width: 1920px; height: 1080px; mix-blend-mode: overlay; }
+</style>
+</head>
+<body>
+  <div class="layer" id="sharpLayer"><div class="plane" id="sharp"><img id="imgA"></div></div>
+  <div id="blurwrap"><div class="layer" id="blurLayer"><div class="plane" id="blurred"><img id="imgB"></div></div></div>
+  <canvas id="grain" width="960" height="540"></canvas>
+  <div id="vignette"></div>
+  <div id="fade"></div>
+<script>
+function rng(seed) { let s = seed >>> 0 || 1; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+function grain(seed, amount) {
+  const c = document.getElementById("grain"), g = c.getContext("2d");
+  c.style.opacity = amount;
+  if (!amount) return;
+  const img = g.createImageData(c.width, c.height), r = rng(seed * 7919 + 13);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 128 + (r() - 0.5) * 90;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+}
+window.compose = async (p) => {
+  const a = document.getElementById("imgA"), b = document.getElementById("imgB");
+  if (a.dataset.src !== p.src) {
+    a.src = b.src = p.src; a.dataset.src = p.src;
+    await Promise.all([a.decode(), b.decode()]);
+  }
+  // Plane transform, applied right to left: move the focus point to the centre and drift along the plane's
+  // surface (the camera path), zoom, then tilt (rotateZ, rotateX) under a 1400 px perspective.
+  const tf = `translate3d(0, ${p.liftY}px, 0) rotateX(${p.rotX}deg) rotateZ(${p.rotZ}deg) scale(${p.scale}) ` +
+             `translate(${-(p.focusX + p.driftX - 960)}px, ${-(p.focusY + p.driftY - 540)}px)`;
+  document.getElementById("sharp").style.transform = tf;
+  document.getElementById("blurred").style.transform = tf;
+  document.getElementById("blurLayer").style.filter = `blur(${p.blur}px)`;
+  // Screen-space mask: blurred copy opaque at the top/bottom edges, transparent across the middle band.
+  const h0 = p.bandCenter - p.bandHalf, h1 = p.bandCenter + p.bandHalf, s = p.bandSoft;
+  const m = `linear-gradient(to bottom, #000 0%, #000 ${h0 - s}%, transparent ${h0}%, transparent ${h1}%, #000 ${h1 + s}%, #000 100%)`;
+  const w = document.getElementById("blurwrap"); w.style.maskImage = m; w.style.webkitMaskImage = m;
+  document.getElementById("vignette").style.background =
+    `radial-gradient(ellipse 75% 70% at 50% 50%, transparent ${p.vignetteInner}%, rgba(0,0,0,${p.vignetteStrength}) 100%)`;
+  grain(p.frame, p.grain);
+  document.getElementById("fade").style.background = `rgba(0,0,0,${p.fade})`;
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  return true;
+};
+</script>
+</body>
+</html>

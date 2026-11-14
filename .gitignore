@@ -33,3 +33,8 @@ smoke/clips/real/
 smoke/results/voice_session_*.json
 
 # eval/fixtures/*.json are committed: repo is private (contains on-screen personal content)
+
+# demo video build output
+demo-video/frames/
+demo-video/out/
+demo-video/node_modules/

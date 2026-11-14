@@ -1,0 +1,397 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Siriously scene</title>
+<!--
+  The flat "screen" for the demo video. Siriously's real UI is native (mac/overlay: an AppKit status card and a
+  SwiftUI menu bar panel); this page rebuilds both from that code (sizes, materials, type, copy, states) on a
+  made-up desktop. Everything is a pure function of time: window.render(shot, ms). No timers, no CSS
+  animations, no network, so every frame is reproducible.
+  Coordinates inside #screen are macOS points (1477 x 831 screen), zoomed 1.3x to fill 1920 x 1080.
+-->
+<style>
+  :root {
+    --label: rgba(255,255,255,0.88);
+    --secondary: rgba(255,255,255,0.55);
+    --tertiary: rgba(255,255,255,0.28);
+    --accent: #0a84ff;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+  body { font-family: var(--font); -webkit-font-smoothing: antialiased; color: var(--label); }
+  #screen { position: absolute; left: 0; top: 0; width: 1477px; height: 831px; zoom: 1.3; overflow: hidden;
+    background:
+      radial-gradient(1200px 700px at 78% 18%, rgba(78, 70, 190, 0.55), transparent 60%),
+      radial-gradient(900px 600px at 12% 88%, rgba(16, 120, 140, 0.45), transparent 60%),
+      radial-gradient(700px 500px at 50% 55%, rgba(120, 40, 120, 0.25), transparent 70%),
+      linear-gradient(160deg, #0b0d1e 0%, #121232 45%, #0a1420 100%); }
+
+  /* menu bar */
+  #menubar { position: absolute; left: 0; top: 0; right: 0; height: 26px; display: flex; align-items: center;
+    padding: 0 14px; font-size: 13px; background: rgba(18, 18, 30, 0.45); backdrop-filter: blur(30px); }
+  #menubar .app { font-weight: 700; margin-right: 18px; }
+  #menubar .m { margin-right: 18px; color: var(--label); }
+  #menubar .right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+  #menubar .right svg { display: block; }
+  #wave-item { width: 30px; height: 22px; border-radius: 5px; display: flex; align-items: center; justify-content: center; }
+  #wave-item.pressed { background: rgba(255,255,255,0.18); }
+
+  /* windows */
+  .win { position: absolute; border-radius: 12px; overflow: hidden; background: #1e1e22;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.12); display: none; }
+  .titlebar { height: 52px; display: flex; align-items: center; padding: 0 16px; background: #2a2a2e;
+    border-bottom: 0.5px solid rgba(255,255,255,0.08); }
+  .lights { display: flex; gap: 8px; margin-right: 18px; }
+  .lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .lights i:nth-child(1) { background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; }
+  .lights i:nth-child(3) { background: #28c840; }
+
+  /* Messages */
+  #messages { left: 520px; top: 50px; width: 740px; height: 360px; }
+  #messages .side { position: absolute; left: 0; top: 0; bottom: 0; width: 240px; background: #232327;
+    border-right: 0.5px solid rgba(255,255,255,0.08); padding-top: 60px; }
+  #messages .search { margin: 0 12px 10px; height: 28px; border-radius: 7px; background: rgba(255,255,255,0.07);
+    color: var(--tertiary); font-size: 13px; display: flex; align-items: center; padding-left: 10px; }
+  .convo { display: flex; gap: 10px; padding: 9px 12px; margin: 0 6px; border-radius: 8px; align-items: center; }
+  .convo.sel { background: var(--accent); }
+  .avatar { width: 38px; height: 38px; border-radius: 50%; flex: none; display: flex; align-items: center;
+    justify-content: center; font-weight: 600; font-size: 15px; color: #fff; }
+  .convo > div:nth-child(2) { min-width: 0; flex: 1; }
+  .convo .who { font-size: 13px; font-weight: 600; }
+  .convo .prev { font-size: 12px; color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .convo.sel .prev { color: rgba(255,255,255,0.8); }
+  .convo .when { margin-left: auto; font-size: 11px; color: var(--secondary); align-self: flex-start; padding-top: 2px; }
+  #messages .chat { position: absolute; left: 240px; right: 0; top: 0; bottom: 0; }
+  #messages .to { height: 52px; display: flex; align-items: center; justify-content: center; font-size: 13px;
+    border-bottom: 0.5px solid rgba(255,255,255,0.08); color: var(--secondary); }
+  #messages .to b { color: var(--label); font-weight: 600; margin-left: 6px; }
+  .thread { position: absolute; left: 0; right: 0; bottom: 58px; padding: 0 22px; display: flex; flex-direction: column; gap: 6px; }
+  .bubble { max-width: 66%; padding: 8px 13px; border-radius: 18px; font-size: 14px; line-height: 1.3; }
+  .bubble.in { background: #3a3a3e; align-self: flex-start; }
+  .bubble.out { background: var(--accent); color: #fff; align-self: flex-end; }
+  .stamp { align-self: center; font-size: 11px; color: var(--tertiary); margin: 6px 0; }
+  .input { position: absolute; left: 18px; right: 18px; bottom: 14px; height: 32px; border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.16); font-size: 14px; display: flex; align-items: center; padding: 0 14px; }
+  .input .ph { color: var(--tertiary); } .caret { display: inline-block; width: 1.5px; height: 17px; background: var(--accent); margin-left: 1px; vertical-align: -3px; }
+
+  /* Safari */
+  #safari { left: 480px; top: 60px; width: 940px; height: 660px; background: #1c1c1e; }
+  #safari .addr { margin: 0 auto; width: 420px; height: 30px; border-radius: 8px; background: rgba(255,255,255,0.08);
+    font-size: 13px; display: flex; align-items: center; justify-content: center; color: var(--label); gap: 6px; }
+  #safari .page { padding: 46px 130px; }
+  #safari .kicker { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: #64d2ff; font-weight: 600; }
+  #safari h1 { font-size: 36px; line-height: 1.12; margin: 10px 0 12px; letter-spacing: -0.01em; color: #fff; }
+  #safari .by { font-size: 13px; color: var(--secondary); margin-bottom: 26px; }
+  #safari p { font-size: 16px; line-height: 1.6; color: rgba(255,255,255,0.78); margin: 0 0 16px; }
+
+  /* Finder */
+  #finder { left: 560px; top: 80px; width: 860px; height: 540px; }
+  #finder .side { position: absolute; left: 0; top: 0; bottom: 0; width: 190px; background: #232327; padding: 64px 10px 0;
+    font-size: 13px; }
+  #finder .side .h { font-size: 11px; color: var(--tertiary); font-weight: 600; margin: 0 8px 6px; }
+  #finder .side div.it { padding: 5px 8px; border-radius: 6px; color: var(--label); }
+  #finder .side div.it.sel { background: rgba(255,255,255,0.12); }
+  #finder .grid { position: absolute; left: 190px; right: 0; top: 52px; bottom: 0; padding: 30px; display: grid;
+    grid-template-columns: repeat(5, 1fr); gap: 26px 10px; align-content: start; }
+  .file { display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 12px; text-align: center; }
+  .file .ic { width: 62px; height: 62px; }
+
+  /* Siriously status card (mac/overlay HUD: 320 pt wide, top-right, popover material) */
+  #card { position: absolute; top: 34px; right: 10px; width: 320px; border-radius: 12px; padding: 9px 14px 9px 13px;
+    display: flex; gap: 9px; align-items: center; background: rgba(46, 46, 52, 0.72);
+    backdrop-filter: blur(40px) saturate(170%); box-shadow: 0 12px 40px rgba(0,0,0,0.45), 0 0 0 0.5px rgba(255,255,255,0.10); }
+  #card .icon { width: 16px; flex: none; display: flex; justify-content: center; color: var(--secondary); }
+  #card .txt { min-width: 0; flex: 1; }
+  #card .title { font-size: 13px; line-height: 16px; }
+  #card .detail { font-size: 11.5px; line-height: 15px; color: var(--secondary); font-variant-numeric: tabular-nums;
+    margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #card .detail.answer { white-space: normal; font-size: 12.5px; line-height: 17px; color: var(--label); }
+  #card .drain { position: absolute; left: 13px; bottom: 3px; height: 2px; border-radius: 1px; background: var(--tertiary); }
+
+  /* Siriously menu bar panel (mac/overlay MenuView) */
+  #panel { position: absolute; top: 31px; width: 358px; border-radius: 12px; padding: 14px; font-size: 12.5px;
+    background: rgba(40, 40, 46, 0.80); backdrop-filter: blur(40px) saturate(170%);
+    box-shadow: 0 24px 70px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.12); transform-origin: 50% 0; }
+  #panel .row { display: flex; align-items: center; }
+  #panel .hdr { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  #panel .name { font-size: 13px; font-weight: 600; }
+  #panel .cap { font-size: 11px; color: var(--secondary); }
+  #panel .sec { font-size: 11px; font-weight: 600; color: var(--secondary); margin-bottom: 6px; }
+  #panel hr { border: 0; border-top: 0.5px solid rgba(255,255,255,0.12); margin: 12px 0; }
+  .switch { width: 32px; height: 19px; border-radius: 10px; position: relative; flex: none; margin-left: auto; }
+  .switch i { position: absolute; top: 1.5px; width: 16px; height: 16px; border-radius: 50%; background: #f2f2f7;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3); }
+  .seg { margin-left: auto; width: 138px; height: 20px; border-radius: 6px; background: rgba(255,255,255,0.08);
+    position: relative; display: flex; font-size: 11px; }
+  .seg span { flex: 1; text-align: center; line-height: 20px; position: relative; z-index: 1; color: var(--label); }
+  .seg .pill { position: absolute; top: 1px; bottom: 1px; width: calc(33.33% - 1px); border-radius: 5px; background: var(--accent); }
+  .perm { display: flex; align-items: center; margin-bottom: 7px; }
+  .recent { display: flex; align-items: baseline; gap: 8px; margin-bottom: 7px; }
+  .recent .s { width: 14px; flex: none; text-align: center; }
+  .recent .d { font-size: 11px; color: var(--secondary); }
+  .recent .tm { margin-left: auto; font-size: 11px; color: var(--tertiary); font-variant-numeric: tabular-nums; }
+
+  /* end card */
+  #endcard { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; }
+  #endcard .mark { display: flex; align-items: center; gap: 22px; }
+  #endcard .word { font-size: 96px; font-weight: 700; letter-spacing: -0.03em; color: #fff; }
+  #endcard .tag { font-size: 30px; font-weight: 500; color: rgba(255,255,255,0.82); margin-top: 18px; letter-spacing: -0.01em; }
+  #endcard .chips { display: flex; gap: 10px; margin-top: 28px; }
+  #endcard .chip { font-size: 14px; padding: 7px 14px; border-radius: 999px; background: rgba(255,255,255,0.08);
+    box-shadow: 0 0 0 0.5px rgba(255,255,255,0.18); color: rgba(255,255,255,0.8); }
+</style>
+</head>
+<body>
+<div id="screen">
+  <div id="menubar">
+    <span class="app" id="appname">Finder</span>
+    <span class="m">File</span><span class="m">Edit</span><span class="m">View</span><span class="m">Window</span><span class="m">Help</span>
+    <div class="right">
+      <span id="wave-item"></span>
+      <svg width="17" height="13" viewBox="0 0 17 13"><path d="M8.5 11.5l2-2.3a3 3 0 0 0-4 0z" fill="white"/><path d="M3.6 6.7a7 7 0 0 1 9.8 0" stroke="white" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M1 4a10.6 10.6 0 0 1 15 0" stroke="white" stroke-width="1.6" fill="none" stroke-linecap="round" opacity=".9"/></svg>
+      <svg width="25" height="12" viewBox="0 0 25 12"><rect x=".5" y=".5" width="21" height="11" rx="3.2" stroke="white" fill="none" opacity=".6"/><rect x="2" y="2" width="15" height="8" rx="2" fill="white"/><rect x="22.6" y="4" width="1.6" height="4" rx=".8" fill="white" opacity=".6"/></svg>
+      <span>Sat Nov 15&nbsp;&nbsp;9:41</span>
+    </div>
+  </div>
+
+  <div class="win" id="messages">
+    <div class="side">
+      <div class="search">Search</div>
+      <div class="convo" id="c-maya"><div class="avatar" style="background:linear-gradient(#f9a86b,#e8665a)">MC</div>
+        <div><div class="who">Maya Chen</div><div class="prev" id="maya-prev">are you still coming tonight?</div></div><div class="when" id="maya-when">9:38</div></div>
+      <div class="convo"><div class="avatar" style="background:linear-gradient(#7ad3a4,#2fa36b)">JL</div>
+        <div><div class="who">Jordan Lee</div><div class="prev">sent the slides 🙌</div></div><div class="when">9:12</div></div>
+      <div class="convo"><div class="avatar" style="background:linear-gradient(#8fb6ff,#4c6fe8)">SR</div>
+        <div><div class="who">Sam Rivera</div><div class="prev">lol yes</div></div><div class="when">Yesterday</div></div>
+      <div class="convo"><div class="avatar" style="background:linear-gradient(#d8a6ff,#9a5ce0)">PK</div>
+        <div><div class="who">Priya Kapoor</div><div class="prev">see you at the hackathon</div></div><div class="when">Friday</div></div>
+    </div>
+    <div class="chat">
+      <div class="to">To:<b>Maya Chen</b></div>
+      <div class="thread" id="thread">
+        <div class="stamp">Today 9:30</div>
+        <div class="bubble in">how's the hackathon going?</div>
+        <div class="bubble out">it actually works offline 🤯</div>
+        <div class="bubble out">demo is at 7, come by!</div>
+        <div class="bubble in">are you still coming tonight?</div>
+        <div class="bubble out" id="newbubble">I'm running late</div>
+      </div>
+      <div class="input" id="input"><span class="ph">iMessage</span></div>
+    </div>
+    <div class="titlebar" style="position:absolute;left:0;top:0;width:240px;background:transparent;border:0"><div class="lights"><i></i><i></i><i></i></div></div>
+  </div>
+
+  <div class="win" id="safari">
+    <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div>
+      <div class="addr"><svg width="10" height="12" viewBox="0 0 10 12"><rect x="1" y="5" width="8" height="6.5" rx="1.5" fill="rgba(255,255,255,.6)"/><path d="M3 5V3.6a2 2 0 0 1 4 0V5" stroke="rgba(255,255,255,.6)" stroke-width="1.4" fill="none"/></svg>localai.blog/ternary-weights</div></div>
+    <div class="page">
+      <div class="kicker">On-device AI</div>
+      <h1>How a 4-billion-parameter model fits in under a gigabyte</h1>
+      <div class="by">8 min read · November 2026</div>
+      <p>Ternary models store every weight as −1, 0 or +1. That is about 1.6 bits per weight instead of 16, so a 4B model shrinks from 8 GB to under 1 GB and runs comfortably on a laptop.</p>
+      <p>Because multiplying by −1, 0 or +1 is just adding, subtracting or skipping, inference is mostly memory-bound. Apple silicon's unified memory makes that fast: no copies between CPU and GPU.</p>
+      <p>The catch is training. Ternary weights have to be learned that way from the start; squeezing a finished model afterwards loses too much accuracy.</p>
+    </div>
+  </div>
+
+  <div class="win" id="finder">
+    <div class="side"><div class="h">Favorites</div><div class="it">Desktop</div><div class="it sel">Documents</div><div class="it">Downloads</div><div class="it">Applications</div></div>
+    <div class="titlebar" style="position:absolute;left:0;top:0;right:0;background:transparent;border:0"><div class="lights"><i></i><i></i><i></i></div><span style="margin-left:180px;font-weight:600;font-size:13px">Documents</span></div>
+    <div class="grid" id="files"></div>
+  </div>
+
+  <div id="endcard">
+    <div class="mark"><span id="endwave"></span><span class="word">Siriously</span></div>
+    <div class="tag" id="tag"><span id="tag1">Talk to your Mac.</span> <span id="tag2">Fully offline.</span></div>
+    <div class="chips" id="chips"><span class="chip">Bonsai 2 · 4B</span><span class="chip">WhisperKit</span><span class="chip">SpeakerKit</span><span class="chip">Voice-locked</span></div>
+  </div>
+
+  <div id="panel"></div>
+  <div id="card"><div class="icon" id="cicon"></div><div class="txt"><div class="title" id="ctitle"></div><div class="detail" id="cdetail"></div></div><div class="drain" id="cdrain"></div></div>
+</div>
+
+<script>
+// ------------------------------------------------------------------------------------------- time helpers
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const seg = (t, a, b) => clamp((t - a) / (b - a));                 // 0 before a, 1 after b
+const easeOut = (x) => 1 - Math.pow(1 - x, 3);
+const easeInOut = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+function words(s, p) { const w = s.split(" "); return w.slice(0, Math.round(w.length * clamp(p))).join(" "); }
+function chars(s, p) { return s.slice(0, Math.round(s.length * clamp(p))); }
+
+// ------------------------------------------------------------------------------------------------ icons
+// SF Symbols stand-ins. "variable" = the iterative variable-colour effect the native card uses while busy.
+function waveform(t, { size = 16, color = "currentColor", animate = false, bars = [0.35, 0.7, 1, 0.55, 0.85, 0.45, 0.25] } = {}) {
+  const n = bars.length, w = size * 1.05, gap = w / n;
+  let out = `<svg width="${w}" height="${size}" viewBox="0 0 ${w} ${size}">`;
+  bars.forEach((h, i) => {
+    let hh = h, op = 1;
+    if (animate) {
+      hh = h * (0.55 + 0.45 * Math.abs(Math.sin(t / 260 + i * 0.9)));
+      op = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t / 180 - i * 0.8));
+    }
+    const bh = Math.max(size * 0.14, size * 0.9 * hh);
+    out += `<rect x="${i * gap + gap * 0.22}" y="${(size - bh) / 2}" width="${gap * 0.56}" height="${bh}" rx="${gap * 0.28}" fill="${color}" opacity="${op.toFixed(3)}"/>`;
+  });
+  return out + "</svg>";
+}
+const ICON = {
+  check: (c) => `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M2.5 7.4l3 3 6-7" stroke="${c}" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  lock: (c) => `<svg width="13" height="15" viewBox="0 0 13 15"><rect x="1.5" y="6.5" width="10" height="7.5" rx="2" fill="${c}"/><path d="M3.8 6.5V4.6a2.7 2.7 0 0 1 5.4 0v1.9" stroke="${c}" stroke-width="1.6" fill="none"/></svg>`,
+  question: (c) => `<svg width="15" height="15" viewBox="0 0 15 15"><circle cx="7.5" cy="7.5" r="6.3" stroke="${c}" stroke-width="1.4" fill="none"/><path d="M5.6 5.8a2 2 0 1 1 2.6 1.9c-.5.2-.7.5-.7 1v.4" stroke="${c}" stroke-width="1.4" fill="none" stroke-linecap="round"/><circle cx="7.5" cy="10.9" r=".9" fill="${c}"/></svg>`,
+  bubble: (c) => `<svg width="16" height="15" viewBox="0 0 16 15"><path d="M3 1.5h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7l-3.4 2.6v-2.6H3a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z" stroke="${c}" stroke-width="1.3" fill="none" stroke-linejoin="round"/><path d="M4.5 5.2h7M4.5 7.8h4.5" stroke="${c}" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  arrow: (c) => `<svg width="14" height="12" viewBox="0 0 14 12"><path d="M1.5 6h10M7.5 1.8L11.8 6 7.5 10.2" stroke="${c}" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  dots: (c, t) => `<svg width="16" height="6" viewBox="0 0 16 6">${[0, 1, 2].map((i) => `<circle cx="${2.5 + i * 5.5}" cy="3" r="1.7" fill="${c}" opacity="${(0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t / 150 - i * 1.3))).toFixed(3)}"/>`).join("")}</svg>`,
+};
+const SEC = "rgba(255,255,255,0.55)", LABEL = "rgba(255,255,255,0.88)";
+
+// -------------------------------------------------------------------------------------------- card / panel
+const $ = (id) => document.getElementById(id);
+function card(o) {
+  const el = $("card");
+  if (!o) { el.style.opacity = 0; return; }
+  const p = o.appear;                                  // 0..1: fade in + settle 4 pt (native fadeIn)
+  el.style.opacity = (o.opacity ?? 1) * easeOut(p);
+  el.style.transform = `translateY(${(-4 * (1 - easeOut(p))).toFixed(2)}px)`;
+  $("cicon").innerHTML = o.icon;
+  $("ctitle").textContent = o.title;
+  $("ctitle").style.color = o.dim ? SEC : LABEL;
+  const d = $("cdetail");
+  d.textContent = o.detail || "";
+  d.style.display = o.detail ? "block" : "none";
+  d.className = "detail" + (o.answer ? " answer" : "");
+  $("cdrain").style.width = o.drain != null ? `${(320 - 27) * clamp(o.drain)}px` : "0px";
+}
+
+function sw(on) {                                       // on: 0..1
+  const c = `rgba(${Math.round(80 - 70 * on)}, ${Math.round(80 + 52 * on)}, ${Math.round(86 + 169 * on)}, ${0.55 + 0.45 * on})`;
+  return `<span class="switch" style="background:${c}"><i style="left:${1.5 + 13 * on}px"></i></span>`;
+}
+function segc(pos) {                                    // pos: 0 allow, 1 ask, 2 block (fractional while sliding)
+  return `<span class="seg"><span class="pill" style="left:${1 + pos * 45.6}px"></span><span>Allow</span><span>Ask</span><span>Block</span></span>`;
+}
+function panel(t, o) {
+  const el = $("panel");
+  if (!o) { el.style.display = "none"; return; }
+  el.style.display = "block";
+  const ap = easeOut(seg(t, o.t0, o.t0 + 260));
+  el.style.opacity = ap;
+  el.style.transform = `scale(${0.965 + 0.035 * ap})`;
+  const on = easeInOut(seg(t, 650, 900));
+  const sendPos = 1 - easeInOut(seg(t, 2350, 2650));
+  const recent = [
+    ["check", "Summarize this", "Ternary weights store −1, 0 or +1…", "9:40", 1150],
+    ["check", "Text Maya I'm running late", "Sent to Maya Chen", "9:39", 1400],
+    ["lock", "Delete everything", "Not your voice", "9:36", 1650],
+    ["check", "Open Notes", "", "9:35", 1900],
+  ];
+  const rows = recent.map(([ic, txt, det, tm, at]) => {
+    const p = easeOut(seg(t, at, at + 300));
+    if (p <= 0) return "";
+    return `<div class="recent" style="opacity:${p};transform:translateY(${(6 * (1 - p)).toFixed(2)}px)">
+      <span class="s">${ic === "lock" ? ICON.lock(SEC) : ICON.check(LABEL)}</span>
+      <span><div style="${ic === "lock" ? "color:" + SEC : ""}">${txt}</div>${det ? `<div class="d">${det}</div>` : ""}</span>
+      <span class="tm">${tm}</span></div>`;
+  }).join("");
+  el.innerHTML = `
+    <div class="hdr"><span style="width:22px;display:flex;justify-content:center">${waveform(t, { size: 18, color: LABEL, animate: on > 0.5 })}</span>
+      <span><div class="name">Siriously</div><div class="cap">${on > 0.5 ? "Listening for “Siriously”" : "Paused"}</div></span>${sw(on)}</div>
+    <div class="row"><span><div>Only respond to “Siriously”</div><div class="cap">Follow-ups don’t need it while the card’s line runs</div></span>${sw(1)}</div>
+    <hr>
+    <div class="sec">Permissions</div>
+    <div class="perm"><span>Sending messages</span>${segc(sendPos)}</div>
+    <div class="perm"><span>Deleting</span>${segc(1)}</div>
+    <div class="perm"><span>Purchases</span>${segc(2)}</div>
+    <div class="perm" style="margin-bottom:0"><span>Quitting apps</span>${segc(0)}</div>
+    <hr>
+    <div class="sec">Recent</div>
+    <div style="min-height:136px">${rows}</div>
+    <hr style="margin-bottom:10px">
+    <div class="row"><span class="cap">Voice lock on · 23 samples of your voice</span><span class="cap" style="margin-left:auto">Quit</span></div>`;
+  const item = $("wave-item").getBoundingClientRect(), scr = $("screen").getBoundingClientRect();
+  el.style.left = `${(item.left + item.width / 2) / 1.3 - 179}px`;
+}
+
+// ------------------------------------------------------------------------------------------------ shots
+const FILES = [["folder", "Photos"], ["folder", "Taxes 2026"], ["doc", "Thesis Draft.docx"], ["pdf", "Q3 Report.pdf"],
+  ["folder", "Hackathon"], ["doc", "Notes.txt"], ["pdf", "Lease.pdf"], ["folder", "Projects"], ["doc", "Resume.pages"], ["folder", "Archive"]];
+function fileIcon(kind) {
+  if (kind === "folder") return `<svg class="ic" viewBox="0 0 62 62"><path d="M5 14a4 4 0 0 1 4-4h14l5 5h25a4 4 0 0 1 4 4v29a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z" fill="#3d9cf5"/><path d="M5 21h52v25a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z" fill="#62b3ff"/></svg>`;
+  const tint = kind === "pdf" ? "#ff5f57" : "#4c8dff";
+  return `<svg class="ic" viewBox="0 0 62 62"><path d="M15 5h22l12 12v38a3 3 0 0 1-3 3H15a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3z" fill="#f2f2f7"/><path d="M37 5l12 12H40a3 3 0 0 1-3-3z" fill="#c7c7cc"/><rect x="18" y="40" width="26" height="9" rx="2" fill="${tint}"/></svg>`;
+}
+$("files").innerHTML = FILES.map(([k, n]) => `<div class="file">${fileIcon(k)}<span>${n}</span></div>`).join("");
+
+function show(ids) { for (const id of ["messages", "safari", "finder"]) $(id).style.display = ids.includes(id) ? "block" : "none"; }
+
+const SHOTS = {
+  menu(t) {
+    show(["safari"]); $("appname").textContent = "Safari";
+    $("endcard").style.display = "none";
+    $("wave-item").className = "pressed";
+    $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    panel(t, { t0: 80 });
+    card(null);
+  },
+  text(t) {
+    show(["messages"]); $("appname").textContent = "Messages";
+    $("endcard").style.display = "none"; panel(t, null);
+    $("wave-item").className = ""; $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    const spoken = "Text Maya I'm running late";
+    const sel = t > 1550;
+    $("c-maya").className = "convo" + (sel ? " sel" : "");
+    const typed = chars("I'm running late", seg(t, 1650, 2250));
+    const sent = t > 3050;
+    const bp = easeOut(seg(t, 3050, 3350));
+    const nb = $("newbubble");
+    nb.style.display = sent ? "block" : "none";
+    nb.style.opacity = bp; nb.style.transform = `translateY(${(10 * (1 - bp)).toFixed(2)}px) scale(${0.96 + 0.04 * bp})`;
+    $("maya-prev").textContent = sent ? "I'm running late" : "are you still coming tonight?";
+    $("maya-when").textContent = sent ? "9:41" : "9:38";
+    $("input").innerHTML = sent || !typed ? `<span class="ph">iMessage</span>` : `<span>${typed}</span><span class="caret"></span>`;
+    const ap = seg(t, 150, 350);
+    if (t < 1350) card({ appear: ap, icon: waveform(t, { color: SEC, animate: true }), title: words(spoken, seg(t, 200, 1250)) || "Text", dim: true });
+    else if (t < 2350) card({ appear: 1, icon: ICON.arrow(SEC), title: spoken, detail: t < 1600 ? "Opening Maya Chen" : `Typing  ·  ${typed ? Math.min(3, 1 + Math.floor(seg(t, 1650, 2250) * 3)) : 1}/3` });
+    else if (t < 3000) card({ appear: 1, icon: ICON.question(LABEL), title: "Send “I'm running late” to Maya Chen?", detail: "Say yes or no" });
+    else card({ appear: 1, icon: ICON.check(LABEL), title: "Send “I'm running late” to Maya Chen?", detail: "Sent to Maya Chen  ·  2.1 s",
+      drain: 1 - seg(t, 3100, 3100 + 10000) });
+  },
+  summary(t) {
+    show(["safari"]); $("appname").textContent = "Safari";
+    $("endcard").style.display = "none"; panel(t, null);
+    $("wave-item").className = ""; $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    const ans = "Ternary models store each weight as −1, 0 or +1, so a 4B model shrinks from 8 GB to under 1 GB and runs fast on a laptop. The trade-off: it has to be trained that way from the start.";
+    const ap = seg(t, 120, 320);
+    if (t < 650) card({ appear: ap, icon: waveform(t, { color: SEC, animate: true }), title: words("Summarize this", seg(t, 150, 600)) || "Summarize", dim: true });
+    else if (t < 1150) card({ appear: 1, icon: ICON.dots(SEC, t), title: "Summarize this", detail: "Reading Safari" });
+    else card({ appear: 1, icon: ICON.bubble(SEC), title: "Summarize this", dim: true, answer: true,
+      detail: words(ans, seg(t, 1150, 2900)) || "…", drain: t > 2950 ? 1 - seg(t, 2950, 2950 + 12000) : null });
+  },
+  lock(t) {
+    show(["finder"]); $("appname").textContent = "Finder";
+    $("endcard").style.display = "none"; panel(t, null);
+    $("wave-item").className = ""; $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    const pulse = t > 900 ? 0.75 + 0.25 * Math.cos((t - 900) / 140) : 1;
+    card({ appear: seg(t, 250, 450), icon: `<span style="opacity:${pulse.toFixed(3)};display:flex">${ICON.lock(SEC)}</span>`,
+      title: "Not your voice", dim: false, detail: chars("“Siriously, delete everything”", seg(t, 450, 1200)) });
+  },
+  end(t) {
+    show([]); $("appname").textContent = "Finder";
+    panel(t, null); card(null);
+    $("wave-item").className = ""; $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    const e = $("endcard"); e.style.display = "flex";
+    const p1 = easeOut(seg(t, 0, 600)), p2 = easeOut(seg(t, 600, 1000)), p3 = easeOut(seg(t, 900, 1300)), p4 = easeOut(seg(t, 1300, 1800));
+    e.querySelector(".mark").style.cssText = `opacity:${p1};transform:translateY(${(14 * (1 - p1)).toFixed(2)}px)`;
+    $("endwave").innerHTML = waveform(t, { size: 80, color: "#fff", animate: true });
+    $("tag1").style.opacity = p2; $("tag2").style.opacity = p3;
+    $("chips").style.cssText = `opacity:${p4};transform:translateY(${(8 * (1 - p4)).toFixed(2)}px)`;
+  },
+};
+
+window.render = (shot, ms) => { SHOTS[shot](ms); return document.fonts.ready.then(() => true); };
+window.render("menu", 0);
+</script>
+</body>
+</html>
