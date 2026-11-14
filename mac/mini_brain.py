@@ -14,14 +14,16 @@ Settings: ~/.siriously/settings.json (shared with the menu bar app and the speec
 Routing, in order (PRD §5.1):
   0. control words ("stop", "cancel", "never mind", "end action", "no") are handled the moment they arrive:
      they halt the running plan between steps, drop pending questions/confirmations and clear the queue
-  1. addressed? Only "Siriously, …" (Whisper often writes "seriously"), or within follow_up_seconds of the
-     last command, or answering a question. Unaddressed speech is ignored silently (no overlay).
+  1. addressed? Only "Siriously, …" (Whisper often writes "seriously"), or speech that starts within
+     follow_up_seconds of the last command *finishing* (the overlay drains a line for that long), or answering a
+     question. Unaddressed speech is ignored silently (no overlay).
   2. pending confirmation ("yes" runs it) or follow-up question (the answer resumes the task)
   3. settings by voice: "always allow sending messages", "ask before deleting", "never allow purchases",
      "turn off the wake word"
   4. texting skill: "text <name> <message>" (recipient verified from the Messages window title)
   5. fast path (instant): open/switch to <app> · scroll · undo · tabs · close window · copy/paste ·
-     new note called X · new folder [in downloads] called X · type X · click <label> · menu items by name
+     new note called X · delete that line/word · type X · click <label> · menu items by name
+  5a. new folder [in downloads] called X: the name is checked on disk first; if taken, offers "X 2" instead
   6. planner (mac/planner.py, Bonsai 2 4B): anything else; up to 3 rounds; at most one follow-up question
 Risky actions follow the permission for their category: allow (just do it), ask (say yes/no), block.
 Events for the overlay go to UDP :8766 in the PRD §4.6 shape.
@@ -56,7 +58,7 @@ DEFAULT_SETTINGS = {
     "listening": True,
     "wake_word": "siriously",
     "wake_word_required": True,
-    "follow_up_seconds": 8,
+    "follow_up_seconds": 10,
     "permissions": {"send_messages": "ask", "delete": "ask", "purchases": "block", "system": "ask",
                     "quit_apps": "allow", "trash": "allow"},
 }
@@ -118,6 +120,13 @@ PAST = {"sent": "Send", "moved": "Move", "deleted": "Delete", "created": "Create
         "opening": "Open", "posting": "Post", "replying": "Reply"}
 FINDER_PLACES = {"downloads": "cmd+option+l", "desktop": "cmd+shift+d", "documents": "cmd+shift+o",
                  "home": "cmd+shift+h", "applications": "cmd+shift+a"}
+PLACE_DIRS = {"downloads": "~/Downloads", "desktop": "~/Desktop", "documents": "~/Documents", "home": "~",
+              "applications": "/Applications"}
+_PLACE = r"(?:\s+(?:in|on|inside|into|to|at|and)\s+(?:the |my )?(downloads?|desktop|documents?|home|applications)(?: folder)?)?"
+FOLDER_RX = re.compile(r"^(?:(?:make|create|add)\s+)?(?:an? )?(new )?folder" + _PLACE +
+                       r"(?:\s+(?:called|named|titled|call)\s+(.+?))?" + _PLACE + "$")
+NAME_RX = re.compile(r"\b(?:called|named|titled|call)\s+(.+?)" + _PLACE.replace("(downloads?", "(?:downloads?")
+                     + r"[\s.!?,]*$", re.I)
 
 
 def norm(text):
@@ -291,6 +300,43 @@ def parse_text_command(t, front_app):
     return None
 
 
+# ------------------------------------------------------------------------------------------------ folders
+def folder_command(t, raw):
+    """'make a folder in downloads called Test' -> (name, place) or None. The name keeps its spoken casing."""
+    m = FOLDER_RX.match(t)
+    if not m or not (m.group(1) or re.match(r"^(make|create|add)\b", t)):
+        return None
+    place = m.group(2) or m.group(4)
+    place = {"download": "downloads", "document": "documents"}.get(place, place)
+    name = (m.group(3) or "").strip()
+    if name and (r := NAME_RX.search(raw or "")):
+        name = r.group(1).strip(" \"'“”‘’.,!?") or name
+    return name, place
+
+
+def folder_actions(name, place, snap):
+    acts = [] if snap["app"]["name"] == "Finder" else [{"op": "open_app", "app": "Finder"}]
+    if place:
+        acts.append({"op": "keys", "keys": FINDER_PLACES[place]})
+    acts.append({"op": "keys", "keys": "cmd+shift+n"})
+    if name:
+        acts += [{"op": "type", "text": name}, {"op": "keys", "keys": "return"}]
+    return acts
+
+
+def folder_dir(place, snap):
+    """The folder the new folder will land in, when we can tell (Finder windows don't expose their path)."""
+    if place:
+        return os.path.expanduser(PLACE_DIRS[place])
+    if snap["app"]["name"] == "Finder":
+        title = (snap.get("window") or "").strip().lower()
+        for d in PLACE_DIRS.values():
+            full = os.path.expanduser(d)
+            if title and title == os.path.basename(full).lower():
+                return full
+    return None
+
+
 # ------------------------------------------------------------------------------------------------ fast path
 def fast_path(t, snap, apps):
     """(description, [actions]) for instant commands, else (None, None)."""
@@ -298,18 +344,11 @@ def fast_path(t, snap, apps):
     k = re.sub(r"^(?:go to |switch to |open |do )?(?:the |a )?", "", t)
     if k in KEYS:
         return k.capitalize(), [{"op": "keys", "keys": KEYS[k]}]
-    place_rx = r"(?:\s+(?:in|on|inside)\s+(?:the |my )?(downloads|desktop|documents|home|applications)(?: folder)?)?"
-    if m := re.match(r"^(?:make |create )?(?:a )?new folder" + place_rx +
-                     r"(?:\s+(?:called|named|titled)\s+(.+?))?" + place_rx + "$", t):
-        place, name = m.group(1) or m.group(3), (m.group(2) or "").strip()
-        acts = [] if snap["app"]["name"] == "Finder" else [{"op": "open_app", "app": "Finder"}]
-        if place:
-            acts.append({"op": "keys", "keys": FINDER_PLACES[place]})
-        acts.append({"op": "keys", "keys": "cmd+shift+n"})
-        if name:
-            acts += [{"op": "type", "text": name}, {"op": "keys", "keys": "return"}]
-        where = f" in {place.title()}" if place else ""
-        return (f"New folder “{name}”{where}" if name else f"New folder{where}"), acts
+    if re.match(r"^(?:delete|remove|clear) (?:that|this|the) (?:whole |entire )?line$", t):
+        return "Delete the line", [{"op": "keys", "keys": "cmd+right"}, {"op": "keys", "keys": "cmd+shift+left"},
+                                   {"op": "keys", "keys": "delete"}, {"op": "keys", "keys": "delete"}]
+    if re.match(r"^(?:delete|remove) (?:that|this|the|the last) word$", t):
+        return "Delete the word", [{"op": "keys", "keys": "option+delete"}]
     if m := re.match(r"^(?:open|launch|start|switch to|go to|bring up|show)\s+(?:the\s+)?(?:app\s+)?(.+?)(?:\s+app)?$", t):
         name = match_app(m.group(1), apps)
         if name and not re.match(r"^(a |an |new |my )", m.group(1)):
@@ -418,8 +457,7 @@ class Brain:
             self.q.put({"_cleanup": p["cancel"], "sid": p["sid"]})   # executor work stays on the worker thread
         log(f"■ {u.get('text')!r} -> stop (running={self.busy}, dropped {drained} queued)")
         emit("heard", u.get("id"), {"text": body or u.get("text")})
-        emit("done", u.get("id"), {"say": "Stopped" if self.busy else "Cancelled"})
-        self.last_active = time.time()
+        emit("done", u.get("id"), {"say": "Stopped" if self.busy else "Cancelled", **self.follow_up()})
         return True
 
     # ---------------------------------------------------------------- worker thread
@@ -427,7 +465,7 @@ class Brain:
         if self.cancel.is_set():
             return
         log(f"     ✗ {msg}")
-        emit("error", uid, {"message": msg})
+        emit("error", uid, {"message": msg, **self.follow_up()})
 
     def execute(self, uid, actions, sid, total=None, offset=0):
         """Run actions in order. -> (ok, error, last_snapshot). Stops between steps when cancelled."""
@@ -447,9 +485,17 @@ class Brain:
                 return False, r["error"], snap
         return True, None, snap
 
+    def follow_up(self):
+        """Event data telling the overlay how long follow-ups work without the wake word (it shows a draining line)."""
+        self.last_active = time.time()
+        st = load_settings()
+        if not st.get("wake_word_required", True) or not st.get("listening", True):
+            return {}
+        return {"follow_up_s": st.get("follow_up_seconds", 10)}
+
     def finish(self, uid, t_end, say=None):
         if not self.cancel.is_set():
-            emit("done", uid, {"say": say} if say else {}, t_end)
+            emit("done", uid, {**({"say": say} if say else {}), **self.follow_up()}, t_end)
             if t_end:
                 log(f"     done {(time.time() - t_end) * 1000:.0f} ms after you stopped talking")
 
@@ -477,7 +523,8 @@ class Brain:
         st = load_settings()
         woke, body = self.strip_wake(raw, st)
         t = norm(body)
-        following = time.time() - self.last_active < st.get("follow_up_seconds", 8)
+        t_start = (t_end - float(u.get("audio_s") or 0)) if t_end else time.time()
+        following = t_start - self.last_active < st.get("follow_up_seconds", 10)
         addressed = woke or not st.get("wake_word_required", True) or self.pending or self.awaiting or following \
             or u.get("internal")
 
@@ -491,7 +538,7 @@ class Brain:
             return
         if woke and not t:                                       # just "Siriously"
             self.last_active = time.time()
-            emit("heard", uid, {"text": "Listening…"})
+            emit("heard", uid, {"text": "Listening…", **self.follow_up()})
             return
         if not u.get("internal"):
             emit("heard", uid, {"text": body})
@@ -508,7 +555,7 @@ class Brain:
             log(f"   pending '{p['say']}' cancelled by {raw!r}")
             if p.get("cancel"):
                 self.execute(uid, p["cancel"], p["sid"])
-            emit("done", uid, {"say": "Cancelled"})
+            emit("done", uid, {"say": "Cancelled", **self.follow_up()})
             if not t or t.split()[0] in NO_WORDS or t.startswith("never mind"):
                 return
         # 2b. answer to a follow-up question
@@ -518,7 +565,7 @@ class Brain:
                 log(f"✓ {raw!r} -> answer to {a['say']!r}")
                 return a["resume"](body, uid, t_end)
             log(f"   question {a['say']!r} dropped")
-            return emit("done", uid, {"say": "Cancelled"})
+            return emit("done", uid, {"say": "Cancelled", **self.follow_up()})
         if not t or FILLER_ONLY.match(t) or all(w in NO_WORDS for w in t.split()):
             return log(f"   ignored filler {raw!r}")
 
@@ -543,7 +590,10 @@ class Brain:
         if rest:
             log(f"✓ {raw!r} -> text message flow  [in {snap['app']['name']}]")
             return self.text_flow(uid, rest, snap, t_end)
-        # 5. fast path
+        # 5a. new folder: check the name on disk *before* touching Finder
+        if fc := folder_command(t, body):
+            return self.new_folder(uid, raw, *fc, snap, t_end)
+        # 5b. fast path
         desc, acts = fast_path(t, snap, self.apps)
         if acts:
             log(f"✓ {raw!r} -> {desc}  [fast path, in {snap['app']['name']}]")
@@ -551,11 +601,7 @@ class Brain:
                 return
             emit("plan", uid, {"say": desc, "steps": len(acts)})
             ok, err, last = self.execute(uid, acts, snap["snapshot_id"])
-            if not ok:
-                return self.fail(uid, err)
-            if desc.startswith("New folder “") and last:
-                return self.check_folder_name(uid, desc, last, t_end)
-            return self.finish(uid, t_end)
+            return self.finish(uid, t_end) if ok else self.fail(uid, err)
         # 6. planner
         return self.run_planner(u, body, t, snap, t_end)
 
@@ -593,7 +639,12 @@ class Brain:
                                                                             "speaker": {"verified": True}}))
             if not acts:
                 if rnd == 0:
-                    emit("route", uid, {"route": "none", "say": p["say"] or "Can't do that"})
+                    say = (p["say"] or "").strip().rstrip(".")
+                    if say and not re.match(r"^(i|i'm|i am|that|this|sorry)\b", say, re.I):
+                        say = f"Not sure how to {say[0].lower() + say[1:]} here"
+                    log(f"     nothing to do: {say!r}")
+                    emit("route", uid, {"route": "none", "say": say or "Not sure how to do that here",
+                                        **self.follow_up()})
                     return
                 return self.finish(uid, t_end)
             if rnd == 0 and self.gate(uid, body, tidy_say(p["say"]), acts, snap):
@@ -621,13 +672,37 @@ class Brain:
             return self.finish(uid, t_end)
         self.fail(uid, error or "Gave up after 3 tries")
 
-    def check_folder_name(self, uid, desc, snap, t_end):
-        """Finder refuses duplicate names with an alert: dismiss it, cancel the rename, undo the folder."""
-        ok_btn = next((i for i in snap["items"] if i["kind"] == "element" and i["role"] == "button"
-                       and i["label"] == "OK"), None)
+    def new_folder(self, uid, raw, name, place, snap, t_end):
+        where = place.title() if place else ""
+        d = folder_dir(place, snap)
+        if name and d and os.path.exists(os.path.join(d, name)):
+            alt = next(f"{name} {k}" for k in range(2, 1000) if not os.path.exists(os.path.join(d, f"{name} {k}")))
+            log(f"✓ {raw!r} -> “{name}” already exists in {d}: offering “{alt}”")
+            return self.confirm(uid, f"“{name}” already exists in {where or os.path.basename(d)}. Make “{alt}” instead",
+                                folder_actions(alt, place, snap), snap)
+        desc = (f"New folder “{name}”" if name else "New folder") + (f" in {where}" if where else "")
+        log(f"✓ {raw!r} -> {desc}  [fast path, in {snap['app']['name']}]")
+        emit("plan", uid, {"say": desc, "steps": len(folder_actions(name, place, snap))})
+        ok, err, last = self.execute(uid, folder_actions(name, place, snap), snap["snapshot_id"])
+        if not ok:
+            return self.fail(uid, err)
+        return self.check_folder_name(uid, name, last, t_end) if name and last else self.finish(uid, t_end)
+
+    def check_folder_name(self, uid, name, snap, t_end):
+        """Fallback when we couldn't check on disk: Finder refuses a duplicate name with an alert, which can take
+        a moment to appear. Dismiss it, cancel the rename and undo the new folder."""
+        def ok_button(sn):
+            return next((i for i in sn["items"] if i["kind"] == "element" and i["role"] == "button"
+                         and i["label"] == "OK"), None)
+        ok_btn = ok_button(snap)
+        for _ in range(3):
+            if ok_btn or self.cancel.is_set():
+                break
+            time.sleep(0.3)
+            snap = self.ui.snapshot()
+            ok_btn = ok_button(snap)
         if ok_btn is None:
             return self.finish(uid, t_end)
-        name = desc.split("“")[1].split("”")[0]
         log(f"     name “{name}” is taken: cleaning up")
         self.execute(uid, [{"op": "press", "target": ok_btn["id"]}, {"op": "keys", "keys": "esc"},
                            {"op": "keys", "keys": "cmd+z"}], snap["snapshot_id"])

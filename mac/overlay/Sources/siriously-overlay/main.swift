@@ -41,6 +41,18 @@ while let a = args.next() {
 
 // MARK: - Panel
 
+/// Hairline along the bottom of the HUD that shrinks while follow-ups still work without the wake word.
+final class DrainView: NSView {
+    var fraction: CGFloat = 1 { didSet { needsDisplay = true } }
+    override func draw(_ dirtyRect: NSRect) {
+        let w = max(0, bounds.width * fraction)
+        guard w > 0 else { return }
+        NSColor.tertiaryLabelColor.setFill()
+        NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: w, height: bounds.height),
+                     xRadius: bounds.height / 2, yRadius: bounds.height / 2).fill()
+    }
+}
+
 final class RoundedEffectView: NSVisualEffectView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -64,6 +76,8 @@ final class HUD {
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private var hideItem: DispatchWorkItem?
+    private let drainView = DrainView()
+    private var drainTimer: Timer?
     private(set) var isShown = false
     private(set) var titleText = ""
 
@@ -128,12 +142,43 @@ final class HUD {
             icon.widthAnchor.constraint(equalToConstant: 16),
             row.widthAnchor.constraint(equalToConstant: width),
         ])
+        drainView.translatesAutoresizingMaskIntoConstraints = false
+        drainView.isHidden = true
+        effect.addSubview(drainView)
+        NSLayoutConstraint.activate([
+            drainView.leadingAnchor.constraint(equalTo: effect.leadingAnchor, constant: 13),
+            drainView.trailingAnchor.constraint(equalTo: effect.trailingAnchor, constant: -14),
+            drainView.bottomAnchor.constraint(equalTo: effect.bottomAnchor, constant: -3),
+            drainView.heightAnchor.constraint(equalToConstant: 2),
+        ])
+    }
+
+    /// Keep the HUD up for `seconds` with a shrinking hairline (the follow-up window), then hide.
+    func drain(_ seconds: TimeInterval) {
+        guard isShown, seconds > 0 else { return }
+        stopDrain()
+        let start = Date()
+        drainView.fraction = 1
+        drainView.isHidden = false
+        drainTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            let f = 1 - Date().timeIntervalSince(start) / seconds
+            if f <= 0 { self.hide() } else { self.drainView.fraction = CGFloat(f) }
+        }
+        hideItem?.cancel()
+    }
+
+    private func stopDrain() {
+        drainTimer?.invalidate()
+        drainTimer = nil
+        drainView.isHidden = true
     }
 
     /// Show or update. `detail: nil` hides the second line. `hideAfter: nil` stays until the next update.
     func show(symbol: String, motion: SymbolMotion = .none, title t: String, secondaryTitle: Bool = false,
               detail d: String? = nil, tint: NSColor = .secondaryLabelColor, hideAfter: TimeInterval? = nil) {
         hideItem?.cancel()
+        stopDrain()
         let changedSymbol = icon.image?.accessibilityDescription != symbol
         if changedSymbol {
             icon.removeAllSymbolEffects()
@@ -172,6 +217,7 @@ final class HUD {
 
     func hide() {
         hideItem?.cancel()
+        stopDrain()
         guard isShown else { return }
         isShown = false
         NSAnimationContext.runAnimationGroup({ ctx in
@@ -318,6 +364,7 @@ final class Controller {
             listening = false
             busyUntil = Date().addingTimeInterval(4)
             hud.show(symbol: "waveform", title: pretty(text), detail: nil, tint: .secondaryLabelColor, hideAfter: 4)
+            if let f = num(data["follow_up_s"]) { busyUntil = .distantPast; hud.drain(f) }
         case "rejected":
             listening = false
             guard !busy, let text = str(data["text"]) else { if !busy { hud.hide() }; return }
@@ -334,6 +381,7 @@ final class Controller {
             case "none":
                 busyUntil = .distantPast
                 hud.setDetail(str(data["say"]) ?? "No matching action", symbol: "minus", hideAfter: 2.2)
+                if let f = num(data["follow_up_s"]) { hud.drain(f) }
             default: break
             }
         case "plan":
@@ -353,6 +401,7 @@ final class Controller {
             let say = str(data["say"]) ?? "Done"
             let t = ms.map { String(format: "%.1f s", $0 / 1000) }
             hud.setDetail(t.map { "\(say)  ·  \($0)" } ?? say, symbol: "checkmark", tint: .labelColor, hideAfter: 1.8)
+            if let f = num(data["follow_up_s"]) { hud.drain(f) }
         case "error":
             guard mine else { return }
             busyUntil = .distantPast
@@ -363,6 +412,7 @@ final class Controller {
             } else {
                 hud.show(symbol: "exclamationmark.triangle", title: msg, tint: .systemOrange, hideAfter: 3.5)
             }
+            if let f = num(data["follow_up_s"]) { hud.drain(max(f, 3.5)) }
         case "ask":
             busyUntil = Date().addingTimeInterval(20)
             let options = (data["options"] as? [String]) ?? []
@@ -657,13 +707,16 @@ struct MenuView: View {
             }
             .padding(.bottom, 12)
 
-            Toggle(isOn: $store.wakeWordRequired) {
+            HStack {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Only respond to “Siriously”")
-                    Text("Follow-ups work for a few seconds without it").font(.caption).foregroundStyle(.secondary)
+                    Text("Follow-ups don’t need it while the card’s line runs").font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+                Spacer()
+                Toggle("Only respond to “Siriously”", isOn: $store.wakeWordRequired)
+                    .toggleStyle(.switch).labelsHidden().controlSize(.small)
             }
-            .toggleStyle(.switch).controlSize(.small)
             .disabled(!store.listening)
 
             Divider().padding(.vertical, 12)
@@ -716,13 +769,17 @@ final class MenuBar: NSObject {
     let store = SettingsStore()
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
+    private lazy var hosting = NSHostingController(rootView: MenuView(store: store))
     private var observers: [AnyCancellable] = []
 
     override init() {
         super.init()
         popover.behavior = .transient
         popover.animates = true
-        popover.contentViewController = NSHostingController(rootView: MenuView(store: store))
+        // Size the popover from SwiftUI's ideal size *before* it is shown. Without this the popover is placed
+        // at a provisional size and then grows around its centre, which pushes its top above the screen.
+        hosting.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = hosting
         if let b = item.button {
             b.target = self
             b.action = #selector(toggle)
@@ -746,6 +803,8 @@ final class MenuBar: NSObject {
             popover.performClose(nil)
         } else if let b = item.button {
             store.load()
+            hosting.view.layoutSubtreeIfNeeded()
+            popover.contentSize = hosting.view.fittingSize
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
         }
