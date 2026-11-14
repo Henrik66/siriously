@@ -6,7 +6,7 @@ import pytest
 
 from brain.contracts import MAX_ACTIONS, Action, UIItem
 from brain.planner.errors import PlannerError
-from brain.planner.schema import build_schema, is_text_input, response_format, to_plan
+from brain.planner.schema import build_schema, is_text_input, response_format, to_action, to_plan
 from brain.planner.testing import notes_snapshot
 
 SHOWN = [it for it in notes_snapshot().items if it.enabled]
@@ -65,27 +65,25 @@ def test_response_format_wraps_schema() -> None:
     assert rf == {"type": "json_schema", "json_schema": {"name": "plan", "strict": True, "schema": {"x": 1}}}
 
 
-def test_to_plan_maps_compact_actions_for_every_op() -> None:
-    reply = {
-        "a": [
-            {"menu": 101},
-            {"type": "standup"},
-            {"type": "budget", "in": 3},
-            {"keys": "Cmd+N"},
-            {"press": 1},
-            {"open": "Notes"},
-        ]
-    }
-    plan = to_plan(reply, "s-1", SHOWN, APPS)
+@pytest.mark.parametrize(
+    ("raw", "action"),
+    [
+        ({"menu": 101}, Action.menu(101)),
+        ({"type": "standup"}, Action.type_text("standup")),
+        ({"type": "budget", "in": 3}, Action.type_text("budget", 3)),
+        ({"keys": "Cmd+N"}, Action.key("cmd+n")),
+        ({"press": 1}, Action.press(1)),
+        ({"open": "Notes"}, Action.open_app("Notes")),
+    ],
+)
+def test_to_action_maps_compact_keys(raw: dict[str, object], action: Action) -> None:
+    assert to_action(raw, SHOWN, APPS) == action
+
+
+def test_to_plan_keeps_snapshot_id_and_order() -> None:
+    plan = to_plan({"a": [{"press": 2}, {"type": "x", "in": 3}, {"keys": "return"}]}, "s-1", SHOWN)
     assert plan.snapshot_id == "s-1" and plan.mode == "actions"
-    assert plan.actions == (
-        Action.menu(101),
-        Action.type_text("standup"),
-        Action.type_text("budget", 3),
-        Action.key("cmd+n"),
-        Action.press(1),
-        Action.open_app("Notes"),
-    )
+    assert plan.actions == (Action.press(2), Action.type_text("x", 3), Action.key("return"))
 
 
 def test_to_plan_scroll_and_wait() -> None:
@@ -155,14 +153,6 @@ def test_open_app_free_text_only_when_planner_has_no_app_list() -> None:
     assert "open" not in _variants(build_schema(SHOWN, []))
 
 
-def test_targeted_actions_after_open_app_are_dropped() -> None:
-    reply = {"a": [{"open": "Notes"}, {"keys": "cmd+n"}, {"press": 1}]}
-    plan = to_plan(reply, "s", SHOWN, APPS)
-    assert plan.actions == (Action.open_app("Notes"), Action.key("cmd+n"))
-    keep = {"a": [{"press": 1}, {"open": "Slack"}, {"type": "hi"}]}
-    assert len(to_plan(keep, "s", SHOWN, APPS).actions) == 3
-
-
 def test_key_aliases_are_normalized() -> None:
     plan = to_plan({"a": [{"keys": "Enter"}, {"keys": "cmd+esc"}]}, "s", SHOWN)
     assert plan.actions == (Action.key("return"), Action.key("cmd+escape"))
@@ -176,3 +166,55 @@ def test_is_text_input_roles() -> None:
     assert not is_text_input(UIItem(1, "menu", path=("Edit", "Find")))
     no_text = [UIItem(1, "element", "button", "Go")]
     assert "in" not in _variants(build_schema(no_text))["type"]["properties"]
+
+
+# --- sanitize_burst: never act on a screen the model could not see ---------------------------
+
+_SAVE_SCREEN = [
+    UIItem(10, "element", "textarea", "Text"),
+    UIItem(2, "element", "row", "Appearance"),
+    UIItem(113, "menu", path=("File", "Save…"), shortcut="cmd+s"),
+    UIItem(110, "menu", path=("File", "New Note"), shortcut="cmd+n"),
+    UIItem(128, "menu", path=("View", "Appearance")),
+]
+_FOCUSED_TEXT = _SAVE_SCREEN[0]
+
+
+def _sanitized(actions: list[dict[str, object]], focused: UIItem | None = None) -> tuple[Action, ...]:
+    return to_plan({"a": actions}, "s", _SAVE_SCREEN, ["Notes"], focused=focused).actions
+
+
+def test_open_app_ends_the_burst() -> None:
+    got = _sanitized([{"open": "Notes"}, {"wait": 500}, {"keys": "cmd+n"}, {"type": "standup"}])
+    assert got == (Action.open_app("Notes"),)
+
+
+def test_targeted_type_after_dialog_opener_loses_stale_target() -> None:
+    got = _sanitized([{"menu": 113}, {"type": "todo", "in": 10}, {"keys": "return"}], _FOCUSED_TEXT)
+    assert got == (Action.menu(113), Action.type_text("todo"), Action.key("return"))
+
+
+def test_targeted_press_after_opener_ends_burst() -> None:
+    assert _sanitized([{"menu": 110}, {"press": 2}]) == (Action.menu(110),)
+
+
+def test_untargeted_type_into_nothing_is_cut() -> None:
+    got = _sanitized([{"menu": 128}, {"type": "dark mode"}, {"keys": "return"}])
+    assert got == (Action.menu(128),)
+
+
+def test_untargeted_type_allowed_with_focus_or_after_focus_creating_step() -> None:
+    assert _sanitized([{"type": "hi"}], _FOCUSED_TEXT) == (Action.type_text("hi"),)
+    got = _sanitized([{"menu": 110}, {"type": "standup"}])
+    assert got == (Action.menu(110), Action.type_text("standup"))
+    assert _sanitized([{"keys": "cmd+f"}, {"type": "x"}]) == (Action.key("cmd+f"), Action.type_text("x"))
+    got = _sanitized([{"type": "x", "in": 10}, {"type": "y"}])
+    assert got == (Action.type_text("x", 10), Action.type_text("y"))
+
+
+def test_empty_actions_only_on_continuation() -> None:
+    assert to_plan({"a": []}, "s", SHOWN, allow_empty=True).actions == ()
+    with pytest.raises(PlannerError):
+        to_plan({"a": []}, "s", SHOWN)
+    schema = build_schema(SHOWN, allow_empty=True)
+    assert schema["anyOf"][0]["properties"]["a"]["minItems"] == 0

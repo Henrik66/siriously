@@ -89,18 +89,21 @@ def action_variants(
     return variants
 
 
-def build_schema(shown: Sequence[UIItem], apps: Sequence[str] = (), *, free_app: bool = False) -> JSON:
+def build_schema(
+    shown: Sequence[UIItem], apps: Sequence[str] = (), *, free_app: bool = False, allow_empty: bool = False
+) -> JSON:
     """Reply schema for one call.
 
     ``apps`` = installed apps allowed for open_app. Empty means no open_app, unless ``free_app``
-    (the planner has no installed-app list at all), which allows any app name.
+    (the planner has no installed-app list at all), which allows any app name. ``allow_empty``
+    permits ``{"a":[]}`` ("nothing left"), used only on continuation calls (a HINT is present).
     """
     element_ids = [it.id for it in shown if it.kind == "element"]
     menu_ids = [it.id for it in shown if it.kind == "menu"]
     text_ids = [it.id for it in shown if is_text_input(it)]
     actions: JSON = {
         "type": "array",
-        "minItems": 1,
+        "minItems": 0 if allow_empty else 1,
         "maxItems": MAX_ACTIONS,
         "items": {"anyOf": action_variants(element_ids, menu_ids, apps, free_app, text_ids)},
     }
@@ -223,10 +226,16 @@ def to_plan(
     apps: Sequence[str] = (),
     *,
     free_app: bool = False,
+    allow_empty: bool = False,
+    focused: UIItem | None = None,
+    front_app: str = "",
 ) -> Plan:
     """Validate a parsed reply against the ids/apps that were offered and build a Plan.
 
     open_app must name one of ``apps``; with ``free_app`` any non-empty name is accepted.
+    ``allow_empty`` accepts ``{"a":[]}`` (continuation: nothing left). ``focused`` is the
+    snapshot's focused item, used by :func:`sanitize_burst`. An open_app of ``front_app`` (the
+    frontmost app) is a no-op and is dropped before sanitizing, so the rest of the burst stays.
     """
     if not isinstance(reply, dict):
         raise _bad(f"reply must be a JSON object, got {type(reply).__name__}")
@@ -243,24 +252,68 @@ def to_plan(
         text = _str(reply.get("text"), "dictation text", TEXT_MAX)
         return Plan(snapshot_id=snapshot_id, actions=(Action.type_text(text),), mode="dictation")
     raw_actions = reply.get("a")
-    if not isinstance(raw_actions, list) or not raw_actions:
+    if not isinstance(raw_actions, list) or (not raw_actions and not allow_empty):
         raise _bad("reply needs a non-empty 'a' list, 'ask' or dictation mode")
     if len(raw_actions) > MAX_ACTIONS:
         raise _bad(f"more than {MAX_ACTIONS} actions")
-    actions = drop_stale_after_open(tuple(to_action(a, shown, apps, free_app) for a in raw_actions))
-    return Plan(snapshot_id=snapshot_id, actions=actions)
+    actions = tuple(to_action(a, shown, apps, free_app) for a in raw_actions)
+    front = front_app.casefold()
+    if front:
+        actions = tuple(a for a in actions if not (a.op == "open_app" and (a.app or "").casefold() == front))
+    return Plan(snapshot_id=snapshot_id, actions=sanitize_burst(actions, shown, focused))
 
 
-def drop_stale_after_open(actions: tuple[Action, ...]) -> tuple[Action, ...]:
-    """Cut the burst at the first targeted action after an open_app.
+_OPENER_PREFIXES = ("new ", "open", "save", "find", "search", "go to", "print", "export", "import")
 
-    Ids belong to the snapshot of the app that was frontmost when planning; once open_app switches
-    apps they are stale by construction. Untargeted keys/type/wait after open_app are kept
-    ("open Notes, cmd+n, type standup" is a valid blind burst).
+
+def opens_new_context(action: Action, shown: Sequence[UIItem]) -> bool:
+    """menu/press on an item that opens a sheet, dialog, window or new document.
+
+    macOS convention: such items end with "…" (Save…, Open…, Find…); plus "New …" items.
     """
+    if action.op not in ("menu", "press") or action.target is None:
+        return False
+    item = next((it for it in shown if it.id == action.target), None)
+    if item is None:
+        return False
+    name = item.name.strip().lower()
+    return name.endswith(("…", "...")) or name.startswith(_OPENER_PREFIXES)
+
+
+def sanitize_burst(
+    actions: tuple[Action, ...], shown: Sequence[UIItem], focused: UIItem | None = None
+) -> tuple[Action, ...]:
+    """Drop the parts of a burst that were planned blind, on a screen the model could not see.
+
+    * open_app ends the burst: the pipeline re-plans on the new app's real snapshot.
+    * After an item that opens a sheet/window (``opens_new_context``), ids from the old screen
+      are stale: a targeted ``type`` loses its target (it types into the new focus); a targeted
+      press/menu ends the burst.
+    * An untargeted ``type`` needs somewhere to go: a focused text field, or an earlier action in
+      the burst that can create focus (an opener, a shortcut, or pressing a text field). Otherwise
+      the burst ends before it ("turn on dark mode" must not type "dark mode" into nothing).
+    """
+    out: list[Action] = []
+    can_type = focused is not None and is_text_input(focused)
     opened = False
-    for i, a in enumerate(actions):
+    for a in actions:
         if opened and a.target is not None:
-            return actions[:i]
-        opened = opened or a.op == "open_app"
-    return actions
+            if a.op != "type":
+                break
+            a = Action.type_text(a.text or "")
+        if a.op == "type" and a.target is None and not can_type:
+            break
+        out.append(a)
+        if a.op == "open_app":
+            break
+        if opens_new_context(a, shown):
+            opened = can_type = True
+        elif (a.op == "keys" and "+" in (a.keys or "")) or (
+            a.op in ("press", "type") and a.target is not None and _is_text_target(a.target, shown)
+        ):
+            can_type = True
+    return tuple(out)
+
+
+def _is_text_target(target: int, shown: Sequence[UIItem]) -> bool:
+    return any(it.id == target and is_text_input(it) for it in shown)

@@ -44,8 +44,9 @@ Actions:
 Rules: use only ids that are listed. Prefer menu items and shortcuts over pressing. Copy text to type \
 from the user's words. If USER names an app from APPS that is not the current APP, start with \
 open_app. If USER names a place that is listed (a channel, folder, contact, tab), go there first. \
-To turn a setting on or off, press its switch or checkbox. If HINT says steps are already done, plan \
-only what is left. If ERROR is given, do it a different way. Never explain."""
+To turn a setting on or off, press its switch or checkbox. After open or a step that opens another \
+screen, stop: you will see the new screen next. If HINT says steps are already done, plan only what \
+is left, or reply {"a":[]} if nothing is left. If ERROR is given, do it a different way. Never explain."""
 
 # (dynamic suffix, model reply) pairs. Keep them short: they are cached, but they still cost
 # prompt-processing time on the first call after a server restart.
@@ -59,7 +60,7 @@ FEW_SHOT: tuple[tuple[str, str], ...] = (
     (
         'APP: Finder | WINDOW: Downloads\nAPPS: Notes\n3 button "Back"\n201 menu "File › New Folder" '
         "(shift+cmd+n)\nUSER: open notes and make a new note called standup",
-        '{"a":[{"open":"Notes"},{"wait":500},{"keys":"cmd+n"},{"type":"standup"}]}',
+        '{"a":[{"open":"Notes"}]}',
     ),
     (
         'APP: Safari | WINDOW: Pricing - Acme\n2 textfield "Search or enter website name"\n'
@@ -90,7 +91,8 @@ FEW_SHOT: tuple[tuple[str, str], ...] = (
     ),
     (
         'APP: System Settings | WINDOW: Bluetooth\n6 row "Bluetooth"\n40 switch "Bluetooth"\n'
-        '41 popupbutton "Show in menu bar"\nHINT: Already done: press(6). Plan only the remaining steps.\n'
+        '41 popupbutton "Show in menu bar"\nHINT: Continuing the user\'s request. Already done: press(6). '
+        "Plan only the remaining steps; return no actions if nothing is left.\n"
         "USER: turn off bluetooth",
         '{"a":[{"press":40}]}',
     ),

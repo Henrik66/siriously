@@ -138,9 +138,9 @@ def test_open_app_rejected_when_no_installed_app_matched() -> None:
 
 
 def test_open_app_free_when_no_app_list() -> None:
-    t = FakeTransport(completion('{"a":[{"open":"Notes"}]}'))
-    plan = BonsaiPlanner((), SETTINGS, transport=t).plan("open notes", notes_snapshot())
-    assert plan.actions == (Action.open_app("Notes"),)
+    t = FakeTransport(completion('{"a":[{"open":"Slack"}]}'))
+    plan = BonsaiPlanner((), SETTINGS, transport=t).plan("open slack", notes_snapshot())
+    assert plan.actions == (Action.open_app("Slack"),)
 
 
 def test_truncated_reply_is_bad_output() -> None:
@@ -182,3 +182,26 @@ def test_warmup_polls_while_server_loads() -> None:
     p.client.backoff_s = 0.0
     p.warmup(timeout_s=10.0)
     assert len(t.calls) == 4
+
+
+def test_continuation_hint_allows_nothing_left() -> None:
+    t = FakeTransport(completion('{"a":[]}'))
+    plan = _planner(t).plan("new note", notes_snapshot(), hint="Already done: menu(101).")
+    assert plan.actions == () and plan.ask is None
+    assert (
+        t.last_body["response_format"]["json_schema"]["schema"]["anyOf"][0]["properties"]["a"]["minItems"]
+        == 0
+    )
+    with pytest.raises(PlannerError):
+        _planner(FakeTransport(completion('{"a":[]}'))).plan("new note", notes_snapshot())
+
+
+def test_frontmost_app_is_never_an_open_target() -> None:
+    # Notes is in front: "open notes and ..." must not re-open it (no-op that stalls continuations).
+    t = FakeTransport(completion('{"a":[{"menu":101}]}'))
+    _planner(t).plan("open notes and start a note called standup", notes_snapshot(), hint="Already done: x.")
+    assert "APPS:" not in t.last_body["messages"][-1]["content"]
+    free = BonsaiPlanner(
+        (), SETTINGS, transport=FakeTransport(completion('{"a":[{"open":"notes"},{"menu":101}]}'))
+    )
+    assert free.plan("open notes", notes_snapshot()).actions == (Action.menu(101),)

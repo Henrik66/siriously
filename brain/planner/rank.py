@@ -78,6 +78,9 @@ CONCEPTS: dict[str, tuple[str, ...]] = {
     "start": ("new",),
     "remove": ("delete",),
     "erase": ("delete",),
+    "trash": ("delete", "trash"),
+    "rid": ("delete",),  # "get rid of"
+    "discard": ("delete",),
     "look": ("find", "search"),
     "search": ("find",),
     "find": ("search",),

@@ -97,10 +97,14 @@ class BonsaiPlanner:
         error: str | None = None,
     ) -> Plan:
         ranked = rank_items(text, snapshot, self.k)
-        apps = match_apps(text, self.apps)
+        # The frontmost app is never an open_app target: re-opening it is a no-op that stalls
+        # continuations ("open notes and …" planned again once Notes is already in front).
+        front = snapshot.app.name.casefold()
+        apps = [a for a in match_apps(text, self.apps) if a.casefold() != front]
         free_app = not self.apps  # no installed-app list at all: allow any app name
         suffix, shown = build_suffix(text, snapshot, ranked, apps, hint=hint, error=error)
-        schema = build_schema(shown, apps, free_app=free_app)
+        allow_empty = hint is not None  # continuation: {"a":[]} means "nothing left to do"
+        schema = build_schema(shown, apps, free_app=free_app, allow_empty=allow_empty)
         stats: dict[str, float] = {
             "items_shown": float(len(shown)),
             "suffix_tokens_est": float(estimate_tokens(suffix)),
@@ -124,11 +128,16 @@ class BonsaiPlanner:
         )
         # Assign whole dicts only: concurrent readers never see a half-filled last_stats.
         self.last_stats, self.last_suffix = stats, suffix
-        return self._to_plan(result, snapshot, shown, apps, free_app)
+        return self._to_plan(result, snapshot, shown, apps, free_app, allow_empty)
 
     @staticmethod
     def _to_plan(
-        result: ChatResult, snapshot: UISnapshot, shown: Sequence[UIItem], apps: Sequence[str], free_app: bool
+        result: ChatResult,
+        snapshot: UISnapshot,
+        shown: Sequence[UIItem],
+        apps: Sequence[str],
+        free_app: bool,
+        allow_empty: bool,
     ) -> Plan:
         if result.finish_reason == "length":
             raise PlannerError("bad_output", f"reply truncated at max_tokens: {result.content[:80]!r}")
@@ -137,4 +146,14 @@ class BonsaiPlanner:
         except (ValueError, RecursionError) as e:
             raise PlannerError("bad_output", f"reply is not JSON: {result.content[:120]!r}") from e
         # Validate against what the model was shown (not the whole snapshot): shown ⊆ snapshot.
-        return to_plan(reply, snapshot.snapshot_id, shown, apps, free_app=free_app)
+        focused = snapshot.item(snapshot.focused_id) if snapshot.focused_id is not None else None
+        return to_plan(
+            reply,
+            snapshot.snapshot_id,
+            shown,
+            apps,
+            free_app=free_app,
+            allow_empty=allow_empty,
+            focused=focused,
+            front_app=snapshot.app.name,
+        )
