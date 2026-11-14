@@ -193,6 +193,11 @@ def _accepts_timeout(planner: Planner) -> bool:
     return _accepts_timeout_cls(type(planner))
 
 
+def _op_ref(action: Action) -> str:
+    """ "menu 110" / "press 7" / "keys": the op plus its target id, so a re-plan can exclude it."""
+    return action.op if action.target is None else f"{action.op} {action.target}"
+
+
 class Brain:
     # Flow steps that stop resolving after earlier steps ran are re-polled this many times.
     resolve_polls = _RESOLVE_POLLS
@@ -463,14 +468,14 @@ class Brain:
         failure: str | None = None
         changed = result.changed
         if not result.ok:
-            failure = f"{action.op} failed: {result.error or 'unknown error'}"
+            failure = f"{_op_ref(action)} failed: {result.error or 'unknown error'}"
         elif not changed and expects_change(action, snap):
             if snap is not None and self._observe_change(snap, result):
                 changed = True
             elif action.op == "press" and self._is_selection(action, snap):
                 pass  # already selected: nothing to change, nothing to retry
             else:
-                failure = f"{action.op} had no effect (UI unchanged)"
+                failure = f"{_op_ref(action)} had no effect (UI unchanged)"
         data: JSON = {
             "i": run.n_actions,
             "action": action.to_dict(),

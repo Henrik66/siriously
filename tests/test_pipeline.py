@@ -1336,3 +1336,12 @@ def test_continuation_never_rechooses_already_open_pane() -> None:
     assert rig.executor.actions == [Action.open_app("System Settings"), Action.press(15), Action.press(42)]
     assert 'Do NOT select "Appearance" again' in str(rig.planner.calls[1]["hint"])  # type: ignore[union-attr]
     assert rig.types()[-1] == "done" and not rig.events("error")
+
+
+def test_failure_messages_name_the_target_id() -> None:
+    """The planner parses "(press|menu) <id>" from ERROR to exclude the item that didn't work."""
+    from brain.pipeline import _op_ref
+
+    assert _op_ref(Action.menu(110)) == "menu 110"
+    assert _op_ref(Action.press(7)) == "press 7"
+    assert _op_ref(Action.key("cmd+n")) == "keys"
