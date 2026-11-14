@@ -22,7 +22,9 @@ OPS: tuple[str, ...] = get_args(Op)
 TARGET_OPS: frozenset[str] = frozenset({"press", "menu"})  # target required
 ItemKind = Literal["element", "menu"]
 Direction = Literal["up", "down"]
-EventType = Literal["heard", "rejected", "route", "plan", "action", "done", "error", "confirm", "ask"]
+EventType = Literal[
+    "heard", "rejected", "route", "plan", "action", "done", "error", "confirm", "ask", "answer"
+]
 EVENT_TYPES: tuple[str, ...] = get_args(EventType)
 RouteKind = Literal["control", "flow", "fastpath", "planner", "dictation", "rejected", "none"]
 ControlWord = Literal["stop", "cancel", "undo", "yes", "no"]

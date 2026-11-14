@@ -53,6 +53,10 @@ class SkillHost(Protocol):
 
     def skill_fail(self, run: Any, message: str) -> Outcome: ...
 
+    def skill_answer(self, run: Any, question: str, use_screen: bool) -> Outcome:
+        """Answer a question with Bonsai (streamed to the overlay), optionally about the screen's text."""
+        ...
+
 
 @dataclass(frozen=True)
 class SkillCall:
@@ -310,7 +314,24 @@ class NewFolder:
         return host.skill_fail(run, failure) if failure else "ok"
 
 
-SKILLS: tuple[Texting | NewFolder, ...] = (Texting(), NewFolder())
+# ---------------------------------------------------------------------------------------------- questions
+
+
+class Question:
+    """'summarize this', 'what does this email say?', 'capital of Peru?' -> a short spoken-style answer."""
+
+    def match(self, text: str, snap: UISnapshot) -> SkillCall | None:
+        from brain.answer import classify
+
+        is_q, screen = classify(text)
+        if not is_q:
+            return None
+        q = text.strip()
+        say = f"Reading {snap.app.name}" if screen else "Thinking"
+        return SkillCall("answer", say, lambda host, run, s: host.skill_answer(run, q, screen))
+
+
+SKILLS: tuple[Texting | NewFolder | Question, ...] = (Texting(), NewFolder(), Question())
 
 
 def match_skill(text: str, snap: UISnapshot) -> SkillCall | None:

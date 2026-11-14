@@ -19,7 +19,8 @@
         "done",
         "error",
         "confirm",
-        "ask"
+        "ask",
+        "answer"
       ]
     },
     "utterance_id": {

@@ -6,6 +6,7 @@ import contextlib
 import functools
 import inspect
 import logging
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -594,6 +595,39 @@ class Brain:
         if self._pending is not None:
             self._pending.on_cancel = tuple(on_cancel)
         return outcome
+
+    def skill_answer(self, run: _Run, question: str, use_screen: bool) -> Outcome:
+        from brain.answer import stream_answer
+
+        screen: dict[str, object] | None = None
+        reader = getattr(self._provider, "screen_text", None)
+        if use_screen and callable(reader):
+            try:
+                screen = reader()
+            except Exception as exc:
+                logger.warning("screen_text failed: %s", exc)
+        base: JSON = {"question": question}
+        self._emit("answer", run.utt, {**base, "text": "", "done": False})
+        gen = run.gen
+
+        def on_text(text: str) -> bool:
+            if self._stop_gen != gen:
+                return False
+            self._emit("answer", run.utt, {**base, "text": text, "done": False})
+            return True
+
+        try:
+            text = stream_answer(question, screen, self._settings, on_text)
+        except Exception as exc:
+            return self.skill_fail(run, f"Bonsai didn’t answer ({type(exc).__name__})")
+        if self._stop_gen != gen:
+            return "stopped"
+        text = text or "I don’t know."
+        self._emit("answer", run.utt, {**base, "text": text, "done": True})
+        if self._prefs is not None and self._prefs.get().get("speak_answers"):
+            with contextlib.suppress(OSError):
+                subprocess.Popen(["/usr/bin/say", text])  # macOS's built-in offline voice
+        return "ok"
 
     def skill_fail(self, run: _Run, message: str) -> Outcome:
         if message != "stopped":

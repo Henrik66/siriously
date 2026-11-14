@@ -350,6 +350,57 @@ class MacUIProvider:
             last = n
             time.sleep(0.25)
 
+    def screen_text(self, max_chars: int = 3000, budget_s: float = 0.8) -> dict:
+        """The readable text of the front window, in reading order, for questions about the screen
+        ("summarize this", "what does this email say"). -> {app, window, text, truncated}."""
+        t0 = time.perf_counter()
+        app = self.frontmost_app()
+        pid = app.processIdentifier()
+        app_el = AX.AXUIElementCreateApplication(pid)
+        self._enable_electron_ax(app_el, pid)
+        window = _attr(app_el, "AXFocusedWindow") or _attr(app_el, "AXMainWindow")
+        main: list[str] = []                          # document bodies and web page text come first
+        rest: list[str] = []
+        size, rest_size, truncated = 0, 0, False
+        focused = _attr(app_el, "AXFocusedUIElement")          # the note / message / document you're in
+        fv = _attr(focused, "AXValue") if focused is not None else None
+        if isinstance(fv, str) and len(fv.strip()) > 20:
+            main.append(fv.strip())
+            size += len(fv)
+        if window is not None:
+            stack = [(window, 0, False)]
+            while stack:
+                if size >= max_chars or time.perf_counter() - t0 > budget_s:
+                    truncated = True
+                    break
+                el, depth, in_doc = stack.pop()
+                role = _attr(el, "AXRole")
+                text = None
+                if role in ("AXStaticText", "AXTextArea", "AXTextField", "AXHeading"):
+                    v = _attr(el, "AXValue") if role != "AXHeading" else _attr(el, "AXTitle")
+                    text = v if isinstance(v, str) else None
+                if text:
+                    t = " ".join(text.split()) if role != "AXTextArea" else text.strip()
+                    if in_doc or role == "AXTextArea":
+                        if t and t not in main[-1:] and not (main and main[0] == t):
+                            main.append(t)
+                            size += len(t) + 1
+                    elif t and rest_size < max_chars and (not rest or rest[-1] != t):
+                        rest.append(t)
+                        rest_size += len(t) + 1
+                if role in ("AXStaticText", "AXTextArea") or depth > 60:
+                    continue                          # their children repeat the value
+                if not in_doc and rest_size >= max_chars and role in ("AXOutline", "AXTable", "AXList", "AXRow"):
+                    continue                          # long sidebars/lists: enough of them already
+                kids = _attr(el, "AXChildren") or []
+                doc = in_doc or role == "AXWebArea"
+                stack.extend((k, depth + 1, doc) for k in reversed(kids))
+        parts = main + rest
+        text = "\n".join(parts)
+        return {"app": str(app.localizedName() or ""), "window": str(_attr(window, "AXTitle") or "") if window else "",
+                "text": text[:max_chars], "truncated": truncated,
+                "ms": round((time.perf_counter() - t0) * 1000)}
+
     def _menu_items(self, app_el, start_id):
         bar = _attr(app_el, "AXMenuBar")
         out, next_id = [], start_id

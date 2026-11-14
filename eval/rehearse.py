@@ -137,8 +137,11 @@ class FixtureStage:
 class LiveStage:
     """A running brain server (the real Mac during rehearsal). Loopback by default; stdlib HTTP only."""
 
-    def __init__(self, base_url: str, token: str | None = None, timeout_s: float = 15.0) -> None:
+    def __init__(
+        self, base_url: str, token: str | None = None, timeout_s: float = 15.0, wake: str = ""
+    ) -> None:
         self.name = f"live {base_url}"
+        self.wake = wake  # the Mac brain only listens to "Siriously, …" (brain.addressing)
         self.base = base_url.rstrip("/")
         self.token = token
         self.timeout_s = timeout_s
@@ -167,6 +170,8 @@ class LiveStage:
     def say(self, uid: str, text: str, verified: bool) -> Heard:
         t0 = time.time()
         speaker = {"verified": verified, "score": 0.8 if verified else 0.05, "name": "rehearsal"}
+        if self.wake:
+            text = f"{self.wake}, {text}"
         body: JSON = {"id": uid, "text": text, "t_speech_end": t0, "stt_ms": 0, "speaker": speaker}
         route = self._request("/utterance?wait=true", body)
         total = (time.time() - t0) * 1000.0
@@ -327,6 +332,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     host, port = os.environ.get("SIRIOUSLY_HOST", "127.0.0.1"), os.environ.get("SIRIOUSLY_PORT", "8765")
     p.add_argument("--url", default=f"http://{host}:{port}", help="server base URL for --live")
     p.add_argument("--timeout", type=float, default=15.0, help="per-request timeout for --live (s)")
+    p.add_argument("--wake", default="Siriously", help="--live: wake word before each line")
     p.add_argument("--no-model", action="store_true", help="fixtures: run without the planner")
     p.add_argument("--bonsai-url", help="fixtures: Bonsai base URL (default SIRIOUSLY_BONSAI_URL)")
     p.add_argument("--pause", type=float, default=0.0, help="seconds between steps (pace a live run)")
@@ -338,7 +344,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def _stage(args: argparse.Namespace) -> tuple[Stage, str, bool]:
     """(stage, planner description, has planner). Raises ConnectionError for an unreachable live server."""
     if args.live:
-        live = LiveStage(args.url, os.environ.get(TOKEN_ENV) or None, args.timeout)
+        live = LiveStage(args.url, os.environ.get(TOKEN_ENV) or None, args.timeout, args.wake)
         health = live.health()
         return live, f"server reports bonsai={health.get('bonsai')}", True
     planner, desc = build_planner(

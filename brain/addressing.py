@@ -37,6 +37,7 @@ DEFAULTS: dict[str, Any] = {
     "wake_word": "siriously",
     "wake_word_required": True,
     "follow_up_seconds": 10,
+    "speak_answers": False,
     "permissions": {
         "send_messages": "ask",
         "delete": "ask",

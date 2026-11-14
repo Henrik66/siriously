@@ -39,6 +39,11 @@ class MacUIProvider:
     def list_apps(self) -> list[str]:
         return list(self.raw.list_apps())
 
+    def screen_text(self, max_chars: int = 3000) -> dict[str, Any]:
+        """Readable text of the front window (questions about the screen). {app, window, text, truncated}"""
+        out: dict[str, Any] = self.raw.screen_text(max_chars=max_chars)
+        return out
+
 
 class MacExecutor:
     """Runs one Action against the snapshot it was planned on; returns the post-action snapshot."""

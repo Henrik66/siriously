@@ -5,7 +5,7 @@
 #   mac/switch_brain.sh status
 # Bonsai (:8080) and the speech daemon keep running. Logs: logs/mini_brain.log, logs/brain.log
 cd "${0:A:h}/.." || exit 1
-stop() { pkill -f "mac/mini_brain.py"; pkill -f "siriously-brain"; sleep 0.8; }
+stop() { pkill -f "mac/mini_brain.py"; pkill -f "siriously-brain"; pkill -f "brain.server"; sleep 0.8; }
 case "$1" in
   mini)
     stop; nohup uv run -q --script mac/mini_brain.py >> logs/mini_brain.log 2>&1 &
@@ -16,7 +16,7 @@ case "$1" in
     curl -s --noproxy '*' 127.0.0.1:8765/health; echo
     echo "Wake word, follow-ups and menu permissions: on (brain/addressing.py)." ;;
   status)
-    pgrep -fl "mac/mini_brain.py|siriously-brain" | grep -v "uv run" || echo "no brain running"
+    pgrep -fl "mac/mini_brain.py|siriously-brain|brain.server" | grep -v "uv run" || echo "no brain running"
     curl -s --noproxy '*' -m 1 127.0.0.1:8765/health; echo ;;
   *) echo "usage: $0 mini|team|status"; exit 2 ;;
 esac

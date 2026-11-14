@@ -53,7 +53,64 @@ final class DrainView: NSView {
     }
 }
 
-final class RoundedEffectView: NSVisualEffectView {
+/// The HUD card: hover shows an × in place of the icon; a two-finger swipe or a drag to the right dismisses it
+/// (like a macOS notification). Clicks never activate the app (non-activating panel).
+final class CardView: RoundedEffectView {
+    var onHover: ((Bool) -> Void)?
+    var onSlide: ((CGFloat) -> Void)?                 // current horizontal offset (positive = right)
+    var onRelease: ((CGFloat, CGFloat) -> Void)?      // offset, velocity (pt per event)
+    private var offset: CGFloat = 0
+    private var lastDelta: CGFloat = 0
+    private var tracking = false
+    private var dragStart: NSPoint?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { onHover?(true) }
+    override func mouseExited(with event: NSEvent) { onHover?(false) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    private func move(by dx: CGFloat) {
+        lastDelta = dx
+        offset += dx
+        offset = max(offset, -10)                     // a little give to the left, none beyond
+        onSlide?(offset)
+    }
+    private func release() {
+        onRelease?(offset, lastDelta)
+        offset = 0; lastDelta = 0; tracking = false; dragStart = nil
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        if !event.momentumPhase.isEmpty { return }    // the swipe already decided on release
+        switch event.phase {
+        case .began:
+            tracking = abs(event.scrollingDeltaX) >= abs(event.scrollingDeltaY)
+            offset = 0
+        case .changed where tracking:
+            // Natural scrolling reports finger direction; classic scrolling the opposite.
+            let dx = event.isDirectionInvertedFromDevice ? event.scrollingDeltaX : -event.scrollingDeltaX
+            move(by: dx)
+        case .ended, .cancelled:
+            if tracking { release() }
+        default:
+            break
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) { dragStart = NSEvent.mouseLocation; offset = 0 }
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = dragStart else { return }
+        move(by: NSEvent.mouseLocation.x - start.x - offset)
+    }
+    override func mouseUp(with event: NSEvent) { if dragStart != nil { release() } }
+}
+
+class RoundedEffectView: NSVisualEffectView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         updateBorder()
@@ -71,7 +128,9 @@ enum SymbolMotion { case none, variable, pulse }
 final class HUD {
     let width: CGFloat = 320
     private let panel: NSPanel
-    private let effect = RoundedEffectView()
+    private let effect = CardView()
+    private let closeButton = NSButton()
+    var onDismiss: (() -> Void)?
     private let icon = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
@@ -80,6 +139,7 @@ final class HUD {
     private var drainTimer: Timer?
     private(set) var isShown = false
     private(set) var titleText = ""
+    var detailText: String { detail.stringValue }
 
     init() {
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: 40),
@@ -87,7 +147,8 @@ final class HUD {
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false               // hover ×, swipe or drag right to dismiss
+        panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -142,6 +203,52 @@ final class HUD {
             icon.widthAnchor.constraint(equalToConstant: 16),
             row.widthAnchor.constraint(equalToConstant: width),
         ])
+        // Hovering swaps the status icon for an × (same spot, so the text never moves).
+        closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Dismiss")
+        closeButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.isBordered = false
+        closeButton.imagePosition = .imageOnly
+        closeButton.target = self
+        closeButton.action = #selector(closeClicked)
+        closeButton.alphaValue = 0
+        closeButton.toolTip = "Dismiss (or swipe right)"
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        effect.addSubview(closeButton)
+        NSLayoutConstraint.activate([
+            closeButton.centerXAnchor.constraint(equalTo: icon.centerXAnchor),
+            closeButton.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 20),
+            closeButton.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        effect.onHover = { [weak self] inside in
+            guard let self else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.15
+                self.closeButton.animator().alphaValue = inside ? 1 : 0
+                self.icon.animator().alphaValue = inside ? 0 : 1
+            }
+        }
+        effect.onSlide = { [weak self] dx in
+            guard let self, self.isShown else { return }
+            let base = self.targetFrame()
+            self.panel.setFrameOrigin(NSPoint(x: base.minX + dx, y: base.minY))
+            self.panel.alphaValue = max(0.25, 1 - max(0, dx) / (self.width * 0.9))
+        }
+        effect.onRelease = { [weak self] dx, v in
+            guard let self, self.isShown else { return }
+            if dx > 70 || (dx > 20 && v > 6) {
+                self.dismiss()
+            } else {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.2
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    self.panel.animator().setFrame(self.targetFrame(), display: true)
+                    self.panel.animator().alphaValue = 1
+                }
+            }
+        }
+
         drainView.translatesAutoresizingMaskIntoConstraints = false
         drainView.isHidden = true
         effect.addSubview(drainView)
@@ -175,6 +282,27 @@ final class HUD {
     }
 
     /// Show or update. `detail: nil` hides the second line. `hideAfter: nil` stays until the next update.
+    private var answerStyle = false
+
+    /// Second line as a short status (one line, small) or as an answer (wrapping, up to 9 lines, readable).
+    private func styleDetail(answer: Bool) {
+        answerStyle = answer
+        detail.maximumNumberOfLines = answer ? 9 : 1
+        detail.lineBreakMode = answer ? .byWordWrapping : .byTruncatingTail
+        detail.cell?.truncatesLastVisibleLine = true
+        detail.preferredMaxLayoutWidth = answer ? title.preferredMaxLayoutWidth : 0
+        detail.font = answer ? .systemFont(ofSize: 12.5) : .monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
+        detail.textColor = answer ? .labelColor : .secondaryLabelColor
+    }
+
+    /// A question and Bonsai's answer, filled in as it streams. Stays until `drain`/hide (or dismissed).
+    func showAnswer(question: String, text: String) {
+        styleDetail(answer: true)
+        show(symbol: "text.bubble", title: question, secondaryTitle: true, detail: text.isEmpty ? "…" : text,
+             tint: .secondaryLabelColor, hideAfter: 40)
+        answerStyle = false                                   // the next plain show() resets the style
+    }
+
     func show(symbol: String, motion: SymbolMotion = .none, title t: String, secondaryTitle: Bool = false,
               detail d: String? = nil, tint: NSColor = .secondaryLabelColor, hideAfter: TimeInterval? = nil) {
         hideItem?.cancel()
@@ -193,6 +321,7 @@ final class HUD {
             }
         }
         titleText = t
+        if !answerStyle { styleDetail(answer: false) }
         title.stringValue = t
         title.textColor = secondaryTitle ? .secondaryLabelColor : .labelColor
         detail.stringValue = d ?? ""
@@ -213,6 +342,31 @@ final class HUD {
         show(symbol: symbol ?? (icon.image?.accessibilityDescription ?? "waveform"), motion: motion,
              title: titleText, secondaryTitle: title.textColor == .secondaryLabelColor, detail: d,
              tint: tint, hideAfter: hideAfter)
+    }
+
+    @objc private func closeClicked() { dismiss() }
+
+    /// Slide out to the right (user dismissed it). The running task is not affected.
+    func dismiss() {
+        guard isShown else { return }
+        hideItem?.cancel()
+        stopDrain()
+        isShown = false
+        onDismiss?()
+        var f = panel.frame
+        f.origin.x = (NSScreen.screens.first ?? NSScreen.main!).frame.maxX + 10
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().setFrame(f, display: true)
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, !self.isShown else { return }
+            self.panel.orderOut(nil)
+            self.icon.removeAllSymbolEffects()
+            self.icon.alphaValue = 1
+            self.closeButton.alphaValue = 0
+        })
     }
 
     func hide() {
@@ -236,7 +390,7 @@ final class HUD {
         let w = title.preferredMaxLayoutWidth
         let oneLine = title.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: 10_000, height: 100)).height
         let th = min(title.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 400)).height, oneLine * 2 + 1)
-        let dh = detail.isHidden ? 0 : detail.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 100)).height + 1
+        let dh = detail.isHidden ? 0 : detail.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 600)).height + 1
         return ceil(th + dh + 18)
     }
 
@@ -264,7 +418,9 @@ final class HUD {
 
     private func fadeIn() {
         isShown = true
-        var f = panel.frame
+        icon.alphaValue = 1
+        closeButton.alphaValue = 0
+        var f = targetFrame()
         f.origin.y += 4                                     // settle 4 px downwards while fading in
         panel.setFrame(f, display: false)
         panel.orderFrontRegardless()
@@ -325,6 +481,30 @@ let commandVerbs: Set<String> = ["open", "close", "delete", "remove", "send", "s
                                  "paste", "turn", "set", "shut", "restart", "lock", "log", "email", "message",
                                  "call", "find", "erase", "trash", "format", "install", "uninstall", "buy", "pay"]
 
+/// The words after the wake word, if `text` addresses Siriously: at the start, or at the start of a later
+/// sentence with at most 6 words before it (same rule as brain/addressing.py). nil = not addressed.
+func afterWakeWord(_ text: String, wake: String) -> String? {
+    let w = wake.lowercased().trimmingCharacters(in: .whitespaces)
+    let core = w == "siriously"
+        ? "(?:siriously|seriously|siri ?ously|sirius ?ly|sirious|cereusly|serious ?ly|seriosly)"
+        : NSRegularExpression.escapedPattern(for: w)
+    guard let rx = try? NSRegularExpression(pattern: "^\\W*(?:(?:hey|hi|ok|okay|yo)\\W+)?" + core + "\\b\\W*",
+                                            options: [.caseInsensitive]) else { return nil }
+    func strip(_ t: String) -> String? {
+        let ns = t as NSString
+        guard let m = rx.firstMatch(in: t, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        return ns.substring(from: m.range.upperBound).trimmingCharacters(in: .whitespaces)
+    }
+    if let body = strip(text) { return body }
+    var start = text.startIndex
+    while let r = text.range(of: #"[.!?]\s+"#, options: .regularExpression, range: start..<text.endIndex) {
+        if text[..<r.lowerBound].split(separator: " ").count > 6 { break }
+        if let body = strip(String(text[r.upperBound...])) { return body }
+        start = r.upperBound
+    }
+    return nil
+}
+
 func looksLikeCommand(_ text: String) -> Bool {
     let words = text.lowercased().split { !$0.isLetter && $0 != "'" }
     guard let first = words.first, words.count <= 12 else { return false }
@@ -364,10 +544,23 @@ final class Controller {
     let hud = HUD()
     var menu: MenuBar?
     private var current: String?
+    private var dismissed: String?                    // utterance whose card the user swiped away
+    private var followUntil = Date.distantPast        // follow-ups need no wake word until then (brain says)
+    private var asking = false                        // a confirm/ask card is waiting for an answer
+    private var answering: String?                    // utterance whose card shows Bonsai's answer
     private var busyUntil = Date.distantPast
     private var listening = false
 
     private var busy: Bool { Date() < busyUntil }
+
+    init() {
+        hud.onDismiss = { [weak self] in
+            guard let self else { return }
+            self.dismissed = self.current
+            self.busyUntil = .distantPast
+            self.listening = false
+        }
+    }
 
     func handle(_ ev: [String: Any]) {
         guard let type = str(ev["type"]) else { return }
@@ -375,9 +568,26 @@ final class Controller {
         let data = normalizeEvent(type, ev["data"] as? [String: Any] ?? [:])
         let ms = num(ev["ms_since_speech_end"])
         menu?.store.record(type: type, uid: uid, data: data)
+        if let uid, uid == dismissed, !["confirm", "ask"].contains(type) { return }   // swiped away: stay quiet
         let mine = uid == nil || uid == current
+        if ["heard", "done", "error"].contains(type) { asking = false }
 
         switch type {
+        case "answer":
+            guard mine, let q = str(data["question"]) else { return }
+            answering = uid
+            busyUntil = Date().addingTimeInterval(20)
+            hud.showAnswer(question: pretty(q), text: str(data["text"]) ?? "")
+            if (data["done"] as? Bool) == true { busyUntil = .distantPast }
+        case "partial":
+            // Live words while you talk; only when you're talking to Siriously, never for normal conversation.
+            guard let text = str(data["text"]), !busy, !asking else { return }
+            let wake = menu?.store.wakeWord ?? "siriously"
+            let required = menu?.store.wakeWordRequired ?? true
+            let body = afterWakeWord(text, wake: wake) ?? ((!required || Date() < followUntil) ? text : nil)
+            guard let body, !body.isEmpty else { return }
+            listening = true
+            hud.show(symbol: "waveform", motion: .variable, title: pretty(body), secondaryTitle: true, hideAfter: 3)
         case "listening":
             guard cfg.showListening, !busy else { return }
             listening = true
@@ -391,7 +601,7 @@ final class Controller {
             listening = false
             busyUntil = Date().addingTimeInterval(4)
             hud.show(symbol: "waveform", title: pretty(text), detail: nil, tint: .secondaryLabelColor, hideAfter: 4)
-            if let f = num(data["follow_up_s"]) { busyUntil = .distantPast; hud.drain(f) }
+            if let f = num(data["follow_up_s"]) { busyUntil = .distantPast; hud.drain(f); followUntil = Date().addingTimeInterval(f) }
         case "rejected":
             listening = false
             guard !busy, let text = str(data["text"]) else { if !busy { hud.hide() }; return }
@@ -408,7 +618,7 @@ final class Controller {
             case "none":
                 busyUntil = .distantPast
                 hud.setDetail(str(data["say"]) ?? "No matching action", symbol: "minus", hideAfter: 2.2)
-                if let f = num(data["follow_up_s"]) { hud.drain(f) }
+                if let f = num(data["follow_up_s"]) { hud.drain(f); followUntil = Date().addingTimeInterval(f) }
             default: break
             }
         case "plan":
@@ -422,13 +632,21 @@ final class Controller {
             let text = str(data["desc"]) ?? describe(a, label: str(data["label"]))
             let i = Int(num(data["index"]) ?? 0), n = Int(num(data["of"]) ?? 0)
             hud.setDetail(n > 1 ? "\(text)  ·  \(i)/\(n)" : text, symbol: "arrow.forward")
+        case "done" where uid != nil && uid == answering:
+            // Keep the answer up long enough to read it (and for follow-ups), with the draining line.
+            busyUntil = .distantPast
+            let words = Double(hud.detailText.split(separator: " ").count)
+            let read = min(25, max(6, words * 0.45 + 2))
+            let f = num(data["follow_up_s"]) ?? 0
+            hud.drain(max(read, f))
+            if f > 0 { followUntil = Date().addingTimeInterval(max(read, f)) }
         case "done":
             guard mine else { return }
             busyUntil = .distantPast
             let say = str(data["say"]) ?? "Done"
             let t = ms.map { String(format: "%.1f s", $0 / 1000) }
             hud.setDetail(t.map { "\(say)  ·  \($0)" } ?? say, symbol: "checkmark", tint: .labelColor, hideAfter: 1.8)
-            if let f = num(data["follow_up_s"]) { hud.drain(f) }
+            if let f = num(data["follow_up_s"]) { hud.drain(f); followUntil = Date().addingTimeInterval(f) }
         case "error":
             guard mine else { return }
             busyUntil = .distantPast
@@ -439,8 +657,9 @@ final class Controller {
             } else {
                 hud.show(symbol: "exclamationmark.triangle", title: msg, tint: .systemOrange, hideAfter: 3.5)
             }
-            if let f = num(data["follow_up_s"]) { hud.drain(max(f, 3.5)) }
+            if let f = num(data["follow_up_s"]) { hud.drain(max(f, 3.5)); followUntil = Date().addingTimeInterval(f) }
         case "ask":
+            asking = true
             busyUntil = Date().addingTimeInterval(20)
             let options = (data["options"] as? [String]) ?? []
             let detail = options.isEmpty ? "Say your answer"
@@ -448,6 +667,7 @@ final class Controller {
             hud.show(symbol: "text.bubble", title: str(data["say"]) ?? "Which one?", detail: detail,
                      tint: .labelColor, hideAfter: 20)
         case "confirm":
+            asking = true
             busyUntil = Date().addingTimeInterval(12)
             hud.show(symbol: "questionmark.circle", title: str(data["say"]) ?? "Are you sure?",
                      detail: "Say yes or no", tint: .labelColor, hideAfter: 12)
@@ -591,6 +811,7 @@ struct RecentItem: Identifiable {
 final class SettingsStore: ObservableObject {
     @Published var listening = true { didSet { if !loading { save() } } }
     @Published var wakeWordRequired = true { didSet { if !loading { save() } } }
+    @Published var speakAnswers = false { didSet { if !loading { save() } } }
     @Published var permissions: [String: String] = [:] { didSet { if !loading { save() } } }
     @Published var recent: [RecentItem] = []
     @Published var working = false
@@ -617,6 +838,7 @@ final class SettingsStore: ObservableObject {
         raw = obj
         listening = (obj["listening"] as? Bool) ?? true
         wakeWordRequired = (obj["wake_word_required"] as? Bool) ?? true
+        speakAnswers = (obj["speak_answers"] as? Bool) ?? false
         wakeWord = (obj["wake_word"] as? String) ?? "siriously"
         permissions = (obj["permissions"] as? [String: String]) ?? [:]
         loading = false
@@ -625,6 +847,7 @@ final class SettingsStore: ObservableObject {
     func save() {
         raw["listening"] = listening
         raw["wake_word_required"] = wakeWordRequired
+        raw["speak_answers"] = speakAnswers
         var p = (raw["permissions"] as? [String: String]) ?? [:]
         for (k, v) in permissions { p[k] = v }
         raw["permissions"] = p
@@ -745,6 +968,18 @@ struct MenuView: View {
                     .toggleStyle(.switch).labelsHidden().controlSize(.small)
             }
             .disabled(!store.listening)
+            .padding(.bottom, 8)
+
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Read answers aloud")
+                    Text("“Siriously, summarize this” also speaks the answer").font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("Read answers aloud", isOn: $store.speakAnswers)
+                    .toggleStyle(.switch).labelsHidden().controlSize(.small)
+            }
 
             Divider().padding(.vertical, 12)
 
