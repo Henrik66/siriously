@@ -102,6 +102,10 @@ final class HUD {
             f.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
         detail.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
+        // The title may wrap to two lines so questions/confirmations always show the full name.
+        title.lineBreakMode = .byWordWrapping
+        title.maximumNumberOfLines = 2
+        title.preferredMaxLayoutWidth = width - 13 - 14 - 16 - 9
 
         let text = NSStackView(views: [title, detail])
         text.orientation = .vertical
@@ -179,9 +183,18 @@ final class HUD {
         })
     }
 
+    /// Height from the text itself (Auto Layout under-reports wrapped NSTextField height).
+    private func contentHeight() -> CGFloat {
+        let w = title.preferredMaxLayoutWidth
+        let oneLine = title.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: 10_000, height: 100)).height
+        let th = min(title.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 400)).height, oneLine * 2 + 1)
+        let dh = detail.isHidden ? 0 : detail.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 100)).height + 1
+        return ceil(th + dh + 18)
+    }
+
     private func targetFrame() -> NSRect {
         effect.layoutSubtreeIfNeeded()
-        let h = max(36, ceil(effect.fittingSize.height))
+        let h = max(36, contentHeight())
         let screen = NSScreen.screens.first ?? NSScreen.main!
         let vf = screen.visibleFrame
         return NSRect(x: vf.maxX - width - 10, y: vf.maxY - h - 8, width: width, height: h)
@@ -346,6 +359,13 @@ final class Controller {
             } else {
                 hud.show(symbol: "exclamationmark.triangle", title: msg, tint: .systemOrange, hideAfter: 3.5)
             }
+        case "ask":
+            busyUntil = Date().addingTimeInterval(20)
+            let options = (data["options"] as? [String]) ?? []
+            let detail = options.isEmpty ? "Say your answer"
+                : options.prefix(4).enumerated().map { "\($0.offset + 1) \($0.element)" }.joined(separator: "   ")
+            hud.show(symbol: "text.bubble", title: str(data["say"]) ?? "Which one?", detail: detail,
+                     tint: .labelColor, hideAfter: 20)
         case "confirm":
             busyUntil = Date().addingTimeInterval(12)
             hud.show(symbol: "questionmark.circle", title: str(data["say"]) ?? "Are you sure?",

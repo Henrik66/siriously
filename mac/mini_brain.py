@@ -156,6 +156,71 @@ def mentioned_app(t, apps):
     return None
 
 
+ORDINALS = {"one": 0, "first": 0, "1": 0, "two": 1, "second": 1, "2": 1, "to": 1, "too": 1, "three": 2, "third": 2,
+            "3": 2, "four": 3, "fourth": 3, "4": 3}
+FILLER_ONLY = re.compile(r"^(um+|uh+|hmm+|mm+|ah+|oh+|huh|okay so|so)$")
+
+
+def pick_option(t, options):
+    """Index of the option the user chose ("the first one", "two", "hariprasad"), else None."""
+    for w in t.split():
+        if w in ORDINALS and ORDINALS[w] < len(options) and len(t.split()) <= 4:
+            return ORDINALS[w]
+    scores = [difflib.SequenceMatcher(None, t, o.lower()).ratio() + (1 if any(o.lower().startswith(x) or
+              any(p.startswith(x) for p in o.lower().split()) for x in t.split() if len(x) >= 3) else 0)
+              for o in options]
+    best_i = max(range(len(options)), key=lambda i: scores[i]) if options else None
+    return best_i if best_i is not None and scores[best_i] >= 0.9 else None
+
+
+def conversations(snap):
+    """Recent Messages conversations from the sidebar: [(name, item)]. Labels look like
+    'Hariprasad Gridharan, I cant bro, 2:31 PM' (pinned: 'kat, CIS 142, …')."""
+    out = []
+    for i in snap["items"]:
+        if i["kind"] == "element" and i["role"] in ("statictext", "row", "cell", "button", "group") and "," in i["label"]:
+            name = i["label"].split(",")[0].strip()
+            if name and not name.startswith("Your "):
+                out.append((name, i))
+    return out
+
+
+def _nm(x):
+    """Spelling-tolerant name form: 'Harry' ~ 'Hari' (collapse double letters, final y -> i)."""
+    return re.sub(r"y$", "i", re.sub(r"(.)\1", r"\1", x.lower()))
+
+
+def match_people(query, convos):
+    q = [_nm(x) for x in query.split()]
+    hits = []
+    for name, item in convos:
+        parts = [_nm(p) for p in name.split()]
+        ok = all(any(p.startswith(x) or difflib.SequenceMatcher(None, x, p[:len(x) + 1]).ratio() >= 0.75 for p in parts)
+                 for x in q)
+        if ok:
+            hits.append((name, item))
+    seen, uniq = set(), []
+    for name, item in hits:
+        if name not in seen:
+            seen.add(name); uniq.append((name, item))
+    return uniq
+
+
+TEXT_CMD = [re.compile(r"^(?:text|imessage)\s+(.+)$"),
+            re.compile(r"^send (?:a |an )?(?:text|message|imessage) to\s+(.+)$"),
+            re.compile(r"^message\s+(.+)$")]
+
+
+def parse_text_command(t, front_app):
+    """'text hari hello' -> 'hari hello' (name + message still joined; split once we can see conversations)."""
+    for n, rx in enumerate(TEXT_CMD):
+        if n == 2 and front_app in CHAT_APPS - {"Messages"}:
+            continue                                  # "message the channel …" in Slack is not an iMessage
+        if m := rx.match(t):
+            return m.group(1)
+    return None
+
+
 def needs_confirm(text, snap, actions):
     labels = {i["id"]: i["label"] for i in snap["items"]}
     apps = {snap["app"]["name"]} | {a.get("app", "") for a in actions if a["op"] == "open_app"}
@@ -177,7 +242,8 @@ class Brain:
         self.ui = MacUIProvider()
         self.ex = MacExecutor(self.ui)
         self.apps = self.ui.list_apps()
-        self.pending = None          # {"uid", "say", "actions", "sid", "t", "text"}
+        self.pending = None          # confirmation: {"uid", "say", "actions", "sid", "t", "cancel"}
+        self.awaiting = None         # follow-up question: {"say", "options", "resume": fn(answer, uid, t_end), "t"}
 
     def execute(self, uid, actions, sid, total=None, offset=0):
         """Run actions in order. -> (ok, error, last_snapshot)"""
@@ -219,12 +285,34 @@ class Brain:
                     emit("error", uid, {"message": err})
                 return
             log(f"   pending '{p['say']}' cancelled by {text!r}")
+            if p.get("cancel"):
+                self.execute(uid, p["cancel"], p["sid"])
             emit("done", uid, {"say": "Cancelled"})
             if not t or t.split()[0] in NO_WORDS or t.startswith("never mind"):
                 return
 
+        # 1b. answer to a follow-up question
+        if self.awaiting:
+            a, self.awaiting = self.awaiting, None
+            if time.time() - a["t"] < CONFIRM_TIMEOUT + 5 and t and t.split()[0] not in NO_WORDS:
+                log(f"✓ {text!r} -> answer to {a['say']!r}")
+                a["resume"](text, uid, t_end)
+                return
+            log(f"   question {a['say']!r} dropped")
+            emit("done", uid, {"say": "Cancelled"})
+            return
+
+        if not t or FILLER_ONLY.match(t) or all(w in NO_WORDS for w in t.split()):
+            log(f"   ignored filler {text!r}")
+            return
+
         snap = self.ui.snapshot()
-        # 2. fast path
+        # 2a. texting skill (deterministic: the recipient is read back from the screen, never assumed)
+        rest = parse_text_command(t, snap["app"]["name"])
+        if rest:
+            log(f"✓ {text!r} -> text message flow  [in {snap['app']['name']}]")
+            return self.text_flow(uid, rest, snap, t_end)
+        # 2b. fast path
         desc, acts = fast_path(t, snap, self.apps)
         if acts:
             log(f"✓ {text!r} -> {desc}  [fast path, in {snap['app']['name']}]")
@@ -256,6 +344,13 @@ class Brain:
                 emit("error", uid, {"message": "Planner unavailable (is Bonsai running?)"})
                 return
             acts = p["actions"]
+            if p.get("ask") and not acts:
+                log(f"     planner asks: {p['ask']!r}")
+                original = text
+                return self.ask_question(uid, p["ask"], [],
+                                         lambda ans, uid2, t2: self.handle({"id": uid2, "text": f"{original} ({ans})",
+                                                                            "t_speech_end": t2,
+                                                                            "speaker": {"verified": True}}))
             log(f"     plan r{rnd + 1} ({p['ms']} ms, {p['new_prompt_tokens']} new tokens): {p['say']!r} "
                 f"{json.dumps(acts, ensure_ascii=False)}")
             if not acts:
@@ -265,7 +360,11 @@ class Brain:
                     emit("done", uid, {}, t_end)
                 return
             if needs_confirm(text if rnd == 0 else "", snap, acts):
-                return self.ask(uid, p["say"], acts, snap)
+                say = p["say"]
+                if snap["app"]["name"] in CHAT_APPS and snap.get("window"):
+                    typed = next((a["text"] for a in acts if a["op"] == "type"), None)
+                    say = f"Send “{typed}” to {snap['window']}" if typed else f"{say} (in {snap['window']})"
+                return self.ask(uid, say, acts, snap)
             emit("plan", uid, {"say": tidy_say(p["say"]), "steps": steps + len(acts)})
             # After open_app, ids of the old app are meaningless: stop there and re-plan in the new app.
             cut = len(acts)
@@ -290,9 +389,70 @@ class Brain:
             return
         emit("error", uid, {"message": error or "Gave up after 3 tries"})
 
-    def ask(self, uid, say, acts, snap):
+    def ask_question(self, uid, say, options, resume):
+        self.awaiting = {"say": say, "options": options, "resume": resume, "t": time.time()}
+        log(f"     asks: {say!r} {options}")
+        emit("ask", uid, {"say": say, "options": options})
+
+    def text_flow(self, uid, rest, snap, t_end, chosen=None, message=None):
+        """text <name> <message> in Messages, with the recipient verified from the window title."""
+        if snap["app"]["name"] != "Messages":
+            ok, err, snap = self.execute(uid, [{"op": "open_app", "app": "Messages"}], snap["snapshot_id"])
+            if not ok:
+                return emit("error", uid, {"message": err})
+        convos = conversations(snap)
+        if chosen is None:
+            words = re.sub(r"\b(saying|that says|that)\b", "|", rest).split("|")[0].split()
+            matches, name_len = [], 0
+            for k in (3, 2, 1):                          # longest name prefix that matches a conversation
+                if len(words) >= k and (m := match_people(" ".join(words[:k]), convos)):
+                    matches, name_len = m, k
+                    break
+            if not matches:
+                return emit("error", uid, {"message": f"No recent conversation with “{words[0].title() if words else '?'}”"})
+            msg = re.sub(r"^(saying|that says|that)\s+", "", " ".join(rest.split()[name_len:])).strip()
+            if len(matches) > 1:
+                names = [n for n, _ in matches[:4]]
+                return self.ask_question(uid, f"Which {' '.join(words[:name_len]).title()}?", names,
+                                         lambda ans, uid2, t2: self._text_pick(uid2, ans, names, rest, msg, t2))
+            chosen, message = matches[0][0], msg
+        # open the conversation (re-find it in the current snapshot) and verify the window title
+        item = next((i for n, i in conversations(snap) if n == chosen), None)
+        if item is None:
+            return emit("error", uid, {"message": f"Can't find the conversation with {chosen}"})
+        ok, err, snap = self.execute(uid, [{"op": "press", "target": item["id"]}], snap["snapshot_id"])
+        if not ok:
+            return emit("error", uid, {"message": err})
+        if (snap.get("window") or "").strip() != chosen:
+            return emit("error", uid, {"message": f"Opened “{snap.get('window')}”, not {chosen}; nothing sent"})
+        if not message:
+            return self.ask_question(uid, f"What should I send to {chosen}?", [],
+                                     lambda ans, uid2, t2: self.text_flow(uid2, rest, self.ui.snapshot(), t2,
+                                                                          chosen=chosen, message=ans.strip()))
+        field = next((i for i in snap["items"] if i["kind"] == "element" and i["role"] == "textfield"
+                      and i["label"] == "Message"), None)
+        if field is None:
+            return emit("error", uid, {"message": "Can't find the message field"})
+        ok, err, snap = self.execute(uid, [{"op": "type", "text": message, "target": field["id"]}], snap["snapshot_id"])
+        if not ok:
+            return emit("error", uid, {"message": err})
+        field = next((i for i in snap["items"] if i["kind"] == "element" and i["role"] == "textfield"
+                      and i["label"] == "Message"), field)
+        # cancel = focus the message field first, then clear it (never ⌘A+Delete on the sidebar)
+        self.ask(uid, f"Send “{message}” to {snap.get('window')}", [{"op": "keys", "keys": "return"}], snap,
+                 cancel=[{"op": "press", "target": field["id"]}, {"op": "keys", "keys": "cmd+a"},
+                         {"op": "keys", "keys": "delete"}])
+
+    def _text_pick(self, uid, answer, names, rest, msg, t_end):
+        i = pick_option(norm(answer), names)
+        if i is None:
+            return emit("error", uid, {"message": f"Didn't catch which one (heard “{answer}”)"})
+        self.text_flow(uid, rest, self.ui.snapshot(), t_end, chosen=names[i], message=msg)
+
+    def ask(self, uid, say, acts, snap, cancel=None):
         say = tidy_say(say)
-        self.pending = {"uid": uid, "say": say, "actions": acts, "sid": snap["snapshot_id"], "t": time.time()}
+        self.pending = {"uid": uid, "say": say, "actions": acts, "sid": snap["snapshot_id"], "t": time.time(),
+                        "cancel": cancel}
         log(f"     needs confirmation: {say!r} {json.dumps(acts, ensure_ascii=False)}")
         emit("confirm", uid, {"say": (say or "Do it").rstrip("?") + "?"})
 

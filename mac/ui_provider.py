@@ -13,6 +13,7 @@ Item ids are scoped to one snapshot_id; `element_ref(snapshot_id, id)` returns t
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import subprocess
@@ -69,8 +70,8 @@ def _frame(el):
         return None
     ok1, pt = AX.AXValueGetValue(pos, AX.kAXValueCGPointType, None)
     ok2, sz = AX.AXValueGetValue(size, AX.kAXValueCGSizeType, None)
-    if not (ok1 and ok2):
-        return None
+    if not (ok1 and ok2) or not all(math.isfinite(v) for v in (pt.x, pt.y, sz.width, sz.height)):
+        return None                       # some Messages elements report an infinite position
     return [round(pt.x), round(pt.y), round(sz.width), round(sz.height)]
 
 

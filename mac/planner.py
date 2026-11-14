@@ -44,6 +44,8 @@ Rules:
   screen and can continue. After open_app the list still shows the OLD app, so use keys/type, not ids.
 - Lines starting with DONE are steps already completed: do not repeat them. If nothing is left, return no actions.
 - If the request cannot be done with these ops, return no actions and say why in a few words.
+- If something essential is missing (who, what text, which file, how long), return no actions and put one short
+  question in "ask".
 - "say" is a 2 to 6 word imperative summary of what you are about to do, like "Send “hello” to Hari" or
   "New folder “receipts”". Never past tense ("Sent", "Moved"). Quote user text with “ ”."""
 
@@ -113,6 +115,11 @@ USER: open display settings""",
 USER: turn this into a checklist and add milk""",
      {"say": "Checklist with milk", "actions": [{"op": "keys", "keys": "cmd+down"}, {"op": "keys", "keys": "return"},
                                                {"op": "menu", "target": 101}, {"op": "type", "text": "milk"}]}),
+    ("""APP: Mail | WINDOW: Inbox
+12 button "Compose"
+31 menu "Message › Forward" (cmd+shift+f)
+USER: forward this to him""",
+     {"say": "", "actions": [], "ask": "Who should I forward it to?"}),
     ("""APP: Calendar | WINDOW: Calendar
 3 button "Today"
 USER: what's the capital of peru""",
@@ -201,7 +208,8 @@ def schema(element_ids: list[int], menu_ids: list[int], input_ids: list[int]) ->
     if menu_ids:
         variants.append(obj({"op": {"const": "menu"}, "target": {"enum": menu_ids}}, ["op", "target"]))
     return obj({"say": {"type": "string", "maxLength": 60},
-                "actions": {"type": "array", "maxItems": 6, "items": {"anyOf": variants}}}, ["say", "actions"])
+                "actions": {"type": "array", "maxItems": 6, "items": {"anyOf": variants}},
+                "ask": {"type": "string", "maxLength": 80}}, ["say", "actions"])
 
 
 def messages(dynamic: str) -> list[dict]:
@@ -232,7 +240,7 @@ def plan(utterance: str, snap: dict, done: list[str] | None = None, error: str |
     out = json.loads(resp["choices"][0]["message"]["content"])
     usage = resp.get("usage", {})
     timings = resp.get("timings", {})
-    return {"say": out.get("say", ""), "actions": out.get("actions", []), "ms": ms,
+    return {"say": out.get("say", ""), "actions": out.get("actions", []), "ask": out.get("ask"), "ms": ms,
             "prompt_tokens": usage.get("prompt_tokens"), "cached_tokens": timings.get("cache_n"),
             "new_prompt_tokens": timings.get("prompt_n"), "dynamic": dynamic}
 

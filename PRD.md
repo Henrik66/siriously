@@ -130,6 +130,8 @@ Teammate ships `FixtureUIProvider` (loads `eval/fixtures/*.json`) and `FakeExecu
 - `action`: `index`, `of`, `action` (the Action dict), and `label` (the target's label, for press/menu) or `desc` (your own wording).
 - `done`: optional `say`, plus top-level `ms_since_speech_end` (shown as "Done · 1.2 s").
 - `error`: `message`. `confirm`: `say` (shown with "Say yes or no").
+- `ask` (new type, follow-up question): `say` (the question) and optional `options` (shown numbered, max 4). The user answers by voice ("the first one", "two", a name, or free text like the message to send). Voice-first on purpose: a clickable or typeable drop-down would take keyboard focus away from the app being controlled.
+- Confirmations and questions must name what is **on screen**, not what the model claims. For example, read the chat's window title, as `mini_brain.text_flow` does. A model-written "Send “hello” to Hari?" once sent to the wrong person.
 
 The overlay connects to `ws://127.0.0.1:8765/events` and retries every 3 s. It also accepts the same JSON as UDP datagrams on 127.0.0.1:8766.
 
