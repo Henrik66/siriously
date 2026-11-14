@@ -452,9 +452,12 @@ class Route:
     teach: bool = False  # "call that <flow>"
     reason: str = ""
     ms: float = 0.0  # time spent deciding, in ms
+    # Compound utterance: text still to handle after ``plan`` runs and the screen settles
+    # ("open notes and start a note called standup" -> plan=open_app Notes, rest="start a note …").
+    rest: str | None = None
 
     def to_dict(self) -> JSON:
-        return {
+        d: JSON = {
             "kind": self.kind,
             "plan": self.plan.to_dict() if self.plan else None,
             "control": self.control,
@@ -463,6 +466,9 @@ class Route:
             "reason": self.reason,
             "ms": round(self.ms, 2),
         }
+        if self.rest is not None:
+            d["rest"] = self.rest
+        return d
 
 
 # ---------------------------------------------------------------------------
