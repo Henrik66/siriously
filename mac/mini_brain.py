@@ -151,6 +151,29 @@ def is_yes(t):
         (len(w) <= 8 and any(x in YES_WORDS for x in w) and not any(x in NO_WORDS for x in w))
 
 
+# Without the wake word (follow-up window), only things that sound like a command count. "Oh, it worked that
+# time" or "notify anyway?" is you talking about the screen, not to it.
+COMMAND_VERBS = set("""open close quit launch start switch go show hide type write dictate text message send reply
+scroll undo redo delete remove clear click press tap select copy paste cut save new make create add rename move
+find search play pause stop skip mute unmute turn set change zoom minimize maximize mark pin unpin archive forward
+empty duplicate sort bookmark refresh reload print check uncheck toggle increase decrease raise lower put bring
+navigate use enter accept decline approve compose attach upload download install sign log lock restart shut sleep
+call facetime email reopen edit format bold italic underline highlight insert view expand collapse focus""".split())
+LEAD_INS = {"and", "also", "then", "now", "next", "ok", "okay", "so", "please", "can", "could", "would", "will",
+            "you", "just", "let's", "lets"}
+
+
+def sounds_like_command(raw, t):
+    r = raw.lower().strip()
+    if not t or r.endswith("?") and not re.match(r"^\W*(?:(?:hey|ok|okay)\W+)?(?:can|could|would|will) you\b", r):
+        return False
+    words = t.split()
+    i = 0
+    while i < len(words) - 1 and words[i] in LEAD_INS:
+        i += 1
+    return words[i] in COMMAND_VERBS or bool(KEYS.get(t))
+
+
 def tidy_say(say):
     """Imperative, curly quotes: "Sent 'hello'" -> "Send “hello”"."""
     say = re.sub(r"['\"]([^'\"]+)['\"]", r"“\1”", (say or "").strip())
@@ -534,8 +557,11 @@ class Brain:
         t = norm(body)
         t_start = (t_end - float(u.get("audio_s") or 0)) if t_end else time.time()
         following = t_start - self.last_active < st.get("follow_up_seconds", 10)
-        addressed = woke or not st.get("wake_word_required", True) or self.pending or self.awaiting or following \
-            or u.get("internal")
+        follow_up_ok = following and sounds_like_command(body, t)
+        if following and not follow_up_ok and not (self.pending or self.awaiting or woke):
+            log(f"· not a command (follow-up window): {raw!r}")
+        addressed = woke or not st.get("wake_word_required", True) or self.pending or self.awaiting \
+            or follow_up_ok or u.get("internal")
 
         if not self.speaker_ok(u, short_reply=bool((self.pending or self.awaiting) and len(t.split()) <= 4)):
             if woke:

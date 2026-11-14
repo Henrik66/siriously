@@ -193,8 +193,11 @@ final class Ear {
         _ = try? await speaker.diarize(audioArray: noise, options: PyannoteDiarizationOptions(numberOfSpeakers: nil))
     }
 
+    /// Clips are padded with 0.5 s of silence on both sides: the VAD cuts tight, and Whisper returns nothing for a
+    /// tight 0.7 s "Yeah." (measured on saved clips; padding recovers it and still drops humming).
     func transcribe(_ audio: [Float]) async throws -> String {
-        let rs = try await whisper.transcribe(audioArray: audio, decodeOptions: decode)
+        let pad = [Float](repeating: 0, count: sampleRate / 2)
+        let rs = try await whisper.transcribe(audioArray: pad + audio + pad, decodeOptions: decode)
         return cleanTranscript(rs.map(\.text).joined(separator: " "))
     }
 
@@ -542,6 +545,22 @@ func runScore(_ ear: Ear) async {
     }
 }
 
+func runProbe(_ ear: Ear) async {
+    var noNS = ear.decode; noNS.noSpeechThreshold = nil
+    var noLP = noNS; noLP.logProbThreshold = nil; noLP.compressionRatioThreshold = nil
+    let pad = [Float](repeating: 0, count: sampleRate / 2)
+    for p in opt.files {
+        guard let a = try? AudioProcessor.loadAudioAsFloatArray(fromPath: p) else { print("cannot read \(p)"); continue }
+        for (name, opts, audio) in [("current", ear.decode, a), ("no-speech off", noNS, a),
+                                    ("padded", ear.decode, pad + a + pad), ("padded+off", noLP, pad + a + pad)] {
+            let r = try? await ear.whisper.transcribe(audioArray: audio, decodeOptions: opts)
+            let raw = (r ?? []).map(\.text).joined(separator: " ")
+            print(String(format: "%-20@ %-16@ raw \"%@\"  ->  \"%@\"", (p as NSString).lastPathComponent, name, raw,
+                         cleanTranscript(raw)))
+        }
+    }
+}
+
 func runDaemon(_ ear: Ear) async throws {
     var vp: Voiceprint?
     if !opt.noLock {
@@ -612,6 +631,9 @@ do {
     case "score":
         if opt.files.isEmpty { usage() }
         await runScore(try await Ear(stt: opt.stt))
+    case "probe":                                   // debug: raw Whisper output under different decode settings
+        if opt.files.isEmpty { usage() }
+        await runProbe(try await Ear(stt: opt.stt))
     default:
         usage()
     }
