@@ -405,7 +405,7 @@ def test_json_content_type_with_charset_ok(client: TestClient) -> None:
     assert r.status_code == 202
 
 
-@pytest.mark.parametrize("origin", ["http://evil.example", "null", "http://127.0.0.1:8765"])
+@pytest.mark.parametrize("origin", ["http://evil.example", "null", "http://127.0.0.1:8766"])
 def test_cross_origin_http_rejected(client: TestClient, fake: FakeBrain, origin: str) -> None:
     hdr = {"Origin": origin}
     r = client.post("/utterance", json=utt_json("u-1", "empty trash"), headers=hdr)

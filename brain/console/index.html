@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Siriously debug console</title>
+<link rel="stylesheet" href="/console/console.css">
+<script src="/console/console.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#cmd-input">Skip to command box</a>
+
+<header class="top">
+  <h1 class="brand">Siriously <span>debug console</span></h1>
+  <p class="offline-note">offline &middot; on-device &middot; no network used</p>
+  <p id="conn" class="conn conn-down" role="status" aria-live="polite">
+    <span class="dot" aria-hidden="true"></span><span id="conn-text">Connecting&hellip;</span>
+  </p>
+</header>
+
+<div id="banner" class="banner" role="alert" hidden></div>
+
+<main>
+  <section class="panel cmd" aria-labelledby="cmd-h">
+    <h2 id="cmd-h" class="sr-only">Type a command</h2>
+    <form id="cmd-form" autocomplete="off">
+      <label class="field" for="cmd-input">Type a command (no mic needed)</label>
+      <div class="cmd-row">
+        <input id="cmd-input" name="text" type="text" maxlength="2000" required
+               placeholder="e.g. new note, then type standup" enterkeyhint="send" spellcheck="false">
+        <button type="submit" class="btn btn-primary">Send</button>
+        <button type="button" id="stop-btn" class="btn btn-stop">Stop</button>
+      </div>
+      <label class="check" for="verified">
+        <input id="verified" type="checkbox" checked>
+        <span>Verified voice <small>(untick to simulate an unenrolled speaker, the judge hijack)</small></span>
+      </label>
+      <p id="cmd-msg" class="cmd-msg" role="status" aria-live="polite"></p>
+    </form>
+  </section>
+
+  <section class="strip" aria-labelledby="stats-h">
+    <h2 id="stats-h" class="sr-only">Statistics</h2>
+    <div class="stat">
+      <span class="stat-label">Handled</span>
+      <span id="st-handled" class="stat-value">0</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Fast path vs model</span>
+      <span id="st-fast" class="stat-value">&mdash;</span>
+      <span id="st-fast-sub" class="stat-sub">no data yet</span>
+    </div>
+    <div class="stat stat-wide">
+      <span class="stat-label">Median first action, by route</span>
+      <ul id="st-latency" class="lat-list"><li class="muted">no actions yet</li></ul>
+    </div>
+    <div class="stat">
+      <span class="stat-label">
+        Energy estimate
+        <button type="button" class="tip" aria-describedby="energy-tip" aria-label="How the energy estimate is computed">?</button>
+        <span id="energy-tip" role="tooltip" class="tip-body"></span>
+      </span>
+      <span id="st-energy" class="stat-value">&mdash;</span>
+      <span id="st-energy-sub" class="stat-sub">no model usage reported</span>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="panel" aria-labelledby="tl-h">
+      <h2 id="tl-h">Live timeline</h2>
+      <ol id="timeline" class="timeline">
+        <li id="tl-empty" class="empty">Waiting for a command. Speak, or type one above.</li>
+      </ol>
+    </section>
+
+    <aside class="panel" aria-labelledby="ev-h">
+      <div class="panel-head">
+        <h2 id="ev-h">Eval scoreboard</h2>
+        <button type="button" id="ev-refresh" class="btn btn-small">Refresh</button>
+      </div>
+      <div id="eval" class="eval" aria-live="polite"><p class="muted">Loading&hellip;</p></div>
+    </aside>
+  </div>
+</main>
+
+<noscript><p class="banner" style="display:block">This console needs JavaScript (it ships with the brain; nothing is loaded from the network).</p></noscript>
+</body>
+</html>

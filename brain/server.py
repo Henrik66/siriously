@@ -4,6 +4,8 @@
 - ``POST /text``       dev convenience: plain text wrapped into an Utterance
 - ``WS   /events``     brain -> overlay event stream (``?history=N`` replays the last N)
 - ``GET  /events/history``, ``GET /health``
+- ``GET  /`` -> ``/console``: offline debug console (static page in ``brain/console/``, same event stream)
+- ``GET  /eval/latest``  eval scoreboard headline from the newest ``eval/results/*.json`` (read-only)
 
 Utterances run one at a time on a single worker thread, except a verified stop phrase (anything
 ``brain.control.parse_control`` calls "stop": "stop", "stop stop", "wait", "hold on", ...), which calls
@@ -48,13 +50,14 @@ import time
 import urllib.request
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import anyio
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.datastructures import Headers, QueryParams
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -89,8 +92,15 @@ HOSTS_ENV = "SIRIOUSLY_ALLOWED_HOSTS"
 # "testserver" is Starlette's TestClient host; it is not resolvable from a browser.
 DEFAULT_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
 TOKEN_HEADER = "X-Siriously-Token"
+CONSOLE_DIR = Path(__file__).resolve().parent / "console"
+CONSOLE_FILES = {  # URL path -> (file name, content type); an explicit whitelist, nothing else is served
+    "/console": ("index.html", "text/html; charset=utf-8"),
+    "/console/console.css": ("console.css", "text/css; charset=utf-8"),
+    "/console/console.js": ("console.js", "text/javascript; charset=utf-8"),
+}
 JSON_ONLY_PATHS = frozenset({"/utterance", "/text"})
-TOKEN_EXEMPT_PATHS = frozenset({"/health"})
+# The console's static files hold no secrets; the page then sends the token (from ``#token=``) itself.
+TOKEN_EXEMPT_PATHS = frozenset({"/health", "/", *CONSOLE_FILES})
 STOP_CANCEL_MESSAGE = "cancelled by stop"
 _STOP_RE = re.compile(r"^\s*stop\b", re.IGNORECASE)
 _WS_GONE = (WebSocketDisconnect, RuntimeError, OSError)  # client went away mid-send/receive
@@ -162,6 +172,19 @@ def allowed_origins(settings: Settings) -> frozenset[str]:
     items: Iterable[object] = raw.split(",") if isinstance(raw, str) else cast(Iterable[object], raw)
     origins = {_norm_origin(str(o)) for o in items}
     return frozenset(o for o in origins if o and o != "null")
+
+
+def console_origins(settings: Settings) -> frozenset[str]:
+    """The server's own ``http://<host>:<port>`` origins (both loopback spellings + the bind host).
+
+    The console page is same-origin, but browsers still send ``Origin`` on its fetch POSTs and WS upgrade.
+    """
+    hosts = {"127.0.0.1", "localhost", str(settings.host).lower().strip("[]")}
+    hosts.discard("0.0.0.0")  # a wildcard bind is not a name a browser can have as its origin
+    hosts.discard("::")
+    return frozenset(
+        f"http://[{h}]:{settings.port}" if ":" in h else f"http://{h}:{settings.port}" for h in hosts
+    )
 
 
 def allowed_hosts(settings: Settings) -> frozenset[str]:
@@ -437,7 +460,7 @@ def create_app(
     app.state.dispatcher = dispatcher
     app.add_middleware(
         AccessGuard,
-        origins=allowed_origins(settings),
+        origins=allowed_origins(settings) | console_origins(settings),
         token=api_token(settings),
         hosts=allowed_hosts(settings),
     )
@@ -498,6 +521,25 @@ def create_app(
     async def health() -> JSON:
         return {"ok": True, "bonsai": await probe.check(), "flows": _flow_count(the_brain)}
 
+    def console_file(path: str) -> Callable[[], FileResponse]:
+        name, media_type = CONSOLE_FILES[path]
+
+        def serve() -> FileResponse:
+            return FileResponse(CONSOLE_DIR / name, media_type=media_type)
+
+        return serve
+
+    for console_path in CONSOLE_FILES:
+        app.add_api_route(console_path, console_file(console_path), methods=["GET"], include_in_schema=False)
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/console", status_code=307)
+
+    @app.get("/eval/latest", responses={404: {"model": ErrorOut}})
+    async def eval_latest() -> JSONResponse:
+        return await asyncio.to_thread(_latest_eval)
+
     @app.get("/events/history")
     async def events_history(n: int = Query(50, ge=0, le=200)) -> JSON:
         events = bus.recent(n)
@@ -508,6 +550,25 @@ def create_app(
         await stream_events(websocket, bus, history)
 
     return app
+
+
+def _latest_eval() -> JSONResponse:
+    """Headline of the newest eval results file. Dev tooling: imported lazily, read-only."""
+    try:
+        from eval import demo_board
+        from eval.report import headline
+    except ImportError:
+        return _error(404, "eval harness is not installed", "EVAL_UNAVAILABLE")
+    path = (
+        demo_board.latest_results(demo_board.DEFAULT_RESULTS) if demo_board.DEFAULT_RESULTS.is_dir() else None
+    )
+    if path is None:
+        return _error(404, "no eval results yet (run: uv run python -m eval.run_eval)", "NO_EVAL_RESULTS")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return JSONResponse(content=headline(data, path.name))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _error(404, f"unreadable eval results {path.name}: {exc}", "NO_EVAL_RESULTS")
 
 
 def _install_error_handlers(app: FastAPI) -> None:

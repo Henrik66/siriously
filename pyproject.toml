@@ -32,6 +32,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["brain"]
+# the offline debug console (static files served by brain.server)
+artifacts = ["brain/console/*.html", "brain/console/*.css", "brain/console/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "brain", "eval"]
