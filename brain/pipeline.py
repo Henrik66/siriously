@@ -470,22 +470,29 @@ class Brain:
                 pass  # already selected: nothing to change, nothing to retry
             else:
                 failure = f"{action.op} had no effect (UI unchanged)"
-        self._emit(
-            "action",
-            run.utt,
-            {
-                "i": run.n_actions,
-                "action": action.to_dict(),
-                "ok": result.ok,
-                "changed": changed,
-                "error": result.error,
-            },
-        )
+        data: JSON = {
+            "i": run.n_actions,
+            "action": action.to_dict(),
+            "ok": result.ok,
+            "changed": changed,
+            "error": result.error,
+        }
+        item = snap.item(action.target) if snap is not None and action.target is not None else None
+        if item is not None:
+            data["label"] = item.display  # human-readable target for overlays ("File › New Note")
+        self._emit("action", run.utt, data)
         run.n_actions += 1
         return result, failure
 
     def _emit_plan(self, run: _Run, plan: Plan, source: str, snap: UISnapshot) -> None:
         data: JSON = {"plan": plan.to_dict(), "source": source}
+        targets = {
+            str(a.target): it.display
+            for a in plan.actions
+            if a.target is not None and (it := snap.item(a.target))
+        }
+        if targets:
+            data["targets"] = targets  # {id: "File › New Note"} so overlays can show names, not ids
         if plan.ask is not None:
             data["ask"] = list(plan.ask)
             data["labels"] = [it.display if (it := snap.item(i)) else "" for i in plan.ask]

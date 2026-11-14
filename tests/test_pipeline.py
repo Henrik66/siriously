@@ -1204,3 +1204,20 @@ def test_continuation_skipped_when_measured_plan_time_exceeds_budget() -> None:
     rig.say("dark mode")
     assert planner.calls == []
     assert rig.types()[-1] == "done"
+
+
+def test_plan_and_action_events_carry_target_names() -> None:
+    """Overlays show "File › New Note", not "menu #110"."""
+    from brain.fixtures import FakeExecutor as FxExecutor
+    from brain.fixtures import FixtureUIProvider
+    from brain.pipeline import build_brain
+
+    provider = FixtureUIProvider("notes")
+    sink = ListSink()
+    settings = dataclasses.replace(Settings(), flows_path=None)  # type: ignore[arg-type]
+    brain = build_brain(provider, FxExecutor(provider), sink, settings=settings, use_model=False)
+    brain.handle(Utterance(id="u1", text="new note"))
+    plan = next(e for e in sink.events if e.type == "plan")
+    assert "New Note" in " ".join(plan.data["targets"].values())
+    action = next(e for e in sink.events if e.type == "action")
+    assert action.data["label"].endswith("New Note")
