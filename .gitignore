@@ -32,7 +32,9 @@ __pycache__/
 smoke/clips/real/
 smoke/results/voice_session_*.json
 
-# eval/fixtures/*.json are committed: repo is private (contains on-screen personal content)
+# eval/fixtures/*.json are hand-built (fictional content) and committed. Raw captures from a real Mac
+# (mac/capture_fixtures.py) hold personal on-screen content and stay local:
+eval/fixtures/mac/
 
 # demo video build output
 demo-video/frames/

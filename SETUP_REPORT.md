@@ -22,7 +22,7 @@ Log started 2026-11-13. Updated after every phase.
 | TTSKit | 🟢 | 0.6B: first audio 133 ms, RTF 1.2 (Low Power Mode); audible playback pending |
 | Argmax local server | 🟢 | OpenAI audio API from Python, 147 ms median, SSE first event 46 ms |
 | start_all.sh | 🟢 | starts Bonsai + Argmax, both health checks pass, stop works |
-| UI provider (`mac/ui_provider.py`) | 🟢 | AX snapshots in 47–68 ms; Electron (Slack) supported; fixtures captured to `eval/fixtures/mac/` |
+| UI provider (`mac/ui_provider.py`) | 🟢 | AX snapshots in 47–68 ms; Electron (Slack) supported; fixtures captured to `eval/fixtures/mac/` (local only, gitignored) |
 | Executor (`mac/executor.py`) | 🟢 | self-test 18/18 (Calculator + TextEdit): press, menu, type (Unicode), keys, scroll, open_app, undo, terminal / wrong-app guard |
 | Speech daemon (`mac/ear`, Swift) | 🟢 | mic → VAD → small.en + voice lock in parallel → POST /utterance. Live: delivered ~0.8 s after you stop talking (600 ms end-of-speech + ~200 ms STT/lock). Models load 0.7 s |
 | Voice lock (live, hackathon rooms) | 🟢 | 23 own / 15 impostor clips incl. room chatter; cut-off −0.49; all room chatter since recalibration rejected (−0.8 to −1.8). Re-enroll in the demo room (`siriously-ear enroll`) |

@@ -6,7 +6,8 @@
 
     uv run --script mac/capture_fixtures.py                    # Finder, Notes, System Settings, Calendar, Slack
     uv run --script mac/capture_fixtures.py Notes Slack        # just these
-Writes eval/fixtures/mac/<slug>.json plus eval/fixtures/mac/apps.json (list_apps()): raw single snapshots. The
+Writes eval/fixtures/mac/<slug>.json plus eval/fixtures/mac/apps.json (list_apps()): raw single snapshots, gitignored
+(they contain whatever is on screen). The
 brain's eval uses multi-state fixtures in eval/fixtures/*.json (docs/MAC_INTEGRATION.md §8). Brings each app to the front.
 NOTE: snapshots contain whatever is on screen (file names, note titles, messages). Review before sharing.
 """

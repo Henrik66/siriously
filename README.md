@@ -117,3 +117,12 @@ Models, virtual environments, logs and third-party checkouts are gitignored (`.g
 On the dev box, `scripts/bonsai/setup.*` puts the model and llama.cpp into `models\` inside the repo (gitignored).
 
 **Off-Mac (teammate):** you only need a Bonsai 2 4B server for development. See PRD section 8.
+
+## Note on the git history
+
+The repo was private during the hackathon and made public for judging. Before publishing (Nov 14, evening) the history was rewritten once to remove personal data:
+
+- Raw UI snapshots captured from Henrik's own Mac (`eval/fixtures/mac/*.json`, and the same files at `eval/fixtures/*.json` in the earliest commits) were dropped from every commit. They held real note titles, Slack workspaces and messages, calendar entries and folder names. The eval uses hand-built fixtures with fictional content, which are unchanged.
+- A real contact's name used as an example in the texting tests was replaced with a made-up one.
+
+Nothing else changed: same 48 commits, same messages, authors and timestamps, same code. Raw captures are now gitignored.
