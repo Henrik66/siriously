@@ -281,26 +281,78 @@ final class Segmenter {
     }
 }
 
-final class Mic {
-    let processor = AudioProcessor()
+/// Captures one specific microphone (by name) with AVCaptureSession, converted to 16 kHz mono Float32.
+/// Unlike AVAudioEngine's input node, this never touches the system default input, so Bluetooth
+/// headphones set as default (e.g. WH-1000XM4) neither silence the capture nor get forced into
+/// their low-quality headset mode.
+final class Mic: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     let seg: Segmenter
-    private let q = DispatchQueue(label: "ear.vad")
+    private let session = AVCaptureSession()
+    private let output = AVCaptureAudioDataOutput()
+    private let q = DispatchQueue(label: "ear.capture")
+    private(set) var deviceName = "?"
+    private(set) var samplesSeen = 0
 
     init(seg: Segmenter) { self.seg = seg }
 
-    func start(name: String) throws {
-        let devices = AudioProcessor.getAudioDevices()
-        let dev = devices.first { $0.name.localizedCaseInsensitiveContains(name) }
-        if dev == nil { log("mic \"\(name)\" not found, using the default input. Devices: \(devices.map(\.name))") }
-        try processor.startRecordingLive(inputDeviceID: dev?.id) { [weak self] buf in
-            guard let self else { return }
-            self.processor.purgeAudioSamples(keepingLast: 0)              // we keep our own buffers
-            self.q.async { self.seg.push(buf) }
-        }
-        log("listening on \(dev?.name ?? "default input")")
+    static func devices() -> [AVCaptureDevice] {
+        AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio,
+                                         position: .unspecified).devices
     }
 
-    func stop() { processor.stopRecording() }
+    func start(name: String) throws {
+        let all = Mic.devices()
+        guard let dev = all.first(where: { $0.localizedName.localizedCaseInsensitiveContains(name) })
+                ?? AVCaptureDevice.default(for: .audio) else {
+            throw NSError(domain: "ear", code: 2, userInfo: [NSLocalizedDescriptionKey: "no microphone found"])
+        }
+        if !dev.localizedName.localizedCaseInsensitiveContains(name) {
+            log("mic \"\(name)\" not found, using \(dev.localizedName). Devices: \(all.map(\.localizedName))")
+        }
+        deviceName = dev.localizedName
+        let input = try AVCaptureDeviceInput(device: dev)
+        session.beginConfiguration()
+        guard session.canAddInput(input) else { throw NSError(domain: "ear", code: 3,
+            userInfo: [NSLocalizedDescriptionKey: "cannot open \(dev.localizedName)"]) }
+        session.addInput(input)
+        output.audioSettings = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: sampleRate,
+                                AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 32,
+                                AVLinearPCMIsFloatKey: true, AVLinearPCMIsNonInterleaved: false,
+                                AVLinearPCMIsBigEndianKey: false]
+        output.setSampleBufferDelegate(self, queue: q)
+        session.addOutput(output)
+        session.commitConfiguration()
+        session.startRunning()
+        log("listening on \(dev.localizedName)")
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sb: CMSampleBuffer, from connection: AVCaptureConnection) {
+        var block: CMBlockBuffer?
+        var abl = AudioBufferList()
+        let st = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sb, bufferListSizeNeededOut: nil, bufferListOut: &abl, bufferListSize: MemoryLayout<AudioBufferList>.size,
+            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil, flags: 0, blockBufferOut: &block)
+        guard st == noErr, let data = abl.mBuffers.mData else { return }
+        let n = Int(abl.mBuffers.mDataByteSize) / MemoryLayout<Float>.size
+        let samples = Array(UnsafeBufferPointer(start: data.bindMemory(to: Float.self, capacity: n), count: n))
+        samplesSeen += n
+        seg.push(samples)
+    }
+
+    /// One-line health check: proves audio is flowing and shows the room level.
+    func reportLevel(after seconds: Double) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
+            let secs = Double(samplesSeen) / Double(sampleRate)
+            if samplesSeen == 0 {
+                log("⚠️  no audio from \(deviceName) after \(Int(seconds)) s. Check System Settings → Privacy → Microphone")
+            } else {
+                log(String(format: "mic ok: %.1f s of audio, room level %.0f dBFS, noise floor %.0f dBFS",
+                           secs, seg.lastDb, seg.floorDb))
+            }
+        }
+    }
+
+    func stop() { session.stopRunning() }
 }
 
 func writeWav(_ samples: [Float], to path: String) throws {
@@ -487,6 +539,7 @@ func runDaemon(_ ear: Ear) async throws {
     seg.onStart = { log("… speech"); overlay.send("listening") }
     seg.onUtterance = { clip, end in cont.yield((clip, end)) }
     try mic.start(name: opt.mic)
+    mic.reportLevel(after: 3)
     log("brain: \(opt.brain)   end-of-speech silence: \(opt.silenceMs) ms   Ctrl-C to stop")
     var n = 0
     let runTag: String = { let f = DateFormatter(); f.dateFormat = "HHmmss"; return f.string(from: Date()) }()
@@ -529,7 +582,7 @@ func runDaemon(_ ear: Ear) async throws {
 do {
     switch opt.cmd {
     case "devices":
-        for d in AudioProcessor.getAudioDevices() { print("\(d.id)\t\(d.name)") }
+        for d in Mic.devices() { print(d.localizedName) }
     case "run":
         try await runDaemon(try await Ear(stt: opt.stt))
     case "enroll":
