@@ -109,6 +109,15 @@ class Executor(Protocol):
 ```
 Teammate ships `FixtureUIProvider` (loads `eval/fixtures/*.json`) and `FakeExecutor` (applies scripted state transitions from fixtures). Henrik ships `MacUIProvider` / `MacExecutor`.
 
+**`MacExecutor` is implemented** (`mac/executor.py`, self-test `uv run --script mac/executor.py --selftest`, 18/18). Behaviour the brain can rely on (please mirror it in `FakeExecutor`):
+- **Ids:** pass the `snapshot_id` the target ids came from. Every `ActionResult.snapshot` is a *new* snapshot with *new* ids; use it for the next plan or re-plan. The provider keeps the last 16 snapshots; older ids fail with `"snapshot … unknown or expired"`.
+- **Keystroke target:** `type`/`keys`/`scroll` go to the app of the newest snapshot (the one passed in, or the executor's own last result). So `[open_app Notes, keys cmd+n]` against the original plan snapshot works as expected.
+- **Safety errors (`ok: false`, nothing sent):** `"X is not in front (Y is); input not sent"` if the user switched apps, `"refusing to send input to Terminal (a terminal)"` for terminal apps. Don't retry these; tell the user.
+- **`changed`:** true when anything visible changed (elements, frames, window, focus, static text digest, focused value/selection, scroll position). `changed: false` with `ok: true` means the action was sent but nothing visibly happened, which is a re-plan signal. Never blindly re-send a `press` on a "Send"-like button.
+- **Extras:** each result also has `ms`; each snapshot has `digest` (hash of static text).
+- **Measured latency, including the settle wait and the new snapshot:** press about 280 ms, keys about 300 ms, menu about 440 ms, type about 0.65 s for a short phrase (about 8 ms per character), open_app 0.8–0.9 s.
+- **`keys` syntax:** `cmd+shift+n`, `return`, `esc`, `tab`, `space`, `delete`, `up/down/left/right`, `home/end/pageup/pagedown`, `cmd+,`, `cmd++`, `cmd+?`, `f1..f20`; modifiers `cmd ctrl option shift fn`. `scroll.amount` = units of 3 lines (default 5). `open_app` matches fuzzily (`"settings"` → System Settings, `"chrome"` → Google Chrome).
+
 ### 4.6 Events (brain → overlay): `WS ws://127.0.0.1:8765/events`
 `{"type": "heard|rejected|route|plan|action|done|error|confirm", "utterance_id": "...", "data": {...}, "ms_since_speech_end": 412}`
 

@@ -12,6 +12,7 @@ Item ids are scoped to one snapshot_id; `element_ref(snapshot_id, id)` returns t
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import time
@@ -47,6 +48,7 @@ MAX_VISIT = int(os.environ.get("SIRIOUSLY_AX_MAX_VISIT", 4000))
 MAX_ELEMENTS = int(os.environ.get("SIRIOUSLY_AX_MAX_ELEMENTS", 200))
 MAX_MENU_ITEMS = int(os.environ.get("SIRIOUSLY_AX_MAX_MENU_ITEMS", 400))
 LABEL_MAX = 60
+MAX_DIGEST_TEXTS = 400      # static texts hashed into the snapshot digest (change detection)
 
 
 def _attr(el, name):
@@ -144,11 +146,12 @@ def _shortcut(item):
 
 
 class MacUIProvider:
-    def __init__(self, keep_snapshots: int = 8):
+    def __init__(self, keep_snapshots: int = 16):
         if not AX.AXIsProcessTrusted():
             raise PermissionError("Accessibility access missing: System Settings → Privacy & Security → "
                                   "Accessibility → enable your terminal app.")
         self._refs: OrderedDict[str, dict[int, object]] = OrderedDict()
+        self._snaps: OrderedDict[str, dict] = OrderedDict()
         self._keep = keep_snapshots
         self._electron_enabled: set[int] = set()
 
@@ -206,6 +209,7 @@ class MacUIProvider:
         visited = 0
         truncated = False
         focused_id = None
+        digest, n_texts = hashlib.blake2b(digest_size=8), 0
 
         if window is not None:
             wframe = _frame(window)
@@ -217,6 +221,11 @@ class MacUIProvider:
                     truncated = True
                     break
                 role = _attr(el, "AXRole")
+                if role == "AXStaticText" and n_texts < MAX_DIGEST_TEXTS:
+                    v = _attr(el, "AXValue")            # content the planner doesn't see, e.g. a result or a
+                    if isinstance(v, str):              # new chat message; lets the executor detect changes
+                        digest.update(v.encode("utf-8", "replace") + b"\0")
+                        n_texts += 1
                 if role in ACTIONABLE_ROLES or (role and "AXPress" in _actions(el) and role != "AXWindow"):
                     fr = _frame(el)
                     if fr and fr[2] > 1 and fr[3] > 1 and (wframe is None or _intersects(fr, wframe)) \
@@ -246,10 +255,7 @@ class MacUIProvider:
                 refs[item["id"]] = ref
                 items.append(item)
 
-        self._refs[snapshot_id] = refs
-        while len(self._refs) > self._keep:
-            self._refs.popitem(last=False)
-        return {
+        result = {
             "snapshot_id": snapshot_id,
             "ts": time.time(),
             "app": {"name": app.localizedName(), "bundle_id": app.bundleIdentifier(), "pid": pid},
@@ -257,10 +263,17 @@ class MacUIProvider:
             "focused_id": focused_id,
             "items": items,
             "truncated": truncated,
+            "digest": digest.hexdigest(),
             "stats": {"ms": round((time.perf_counter() - t0) * 1000), "visited": visited,
                       "elements": sum(1 for i in items if i["kind"] == "element"),
                       "menus": sum(1 for i in items if i["kind"] == "menu")},
         }
+        self._refs[snapshot_id] = refs
+        self._snaps[snapshot_id] = result
+        while len(self._refs) > self._keep:
+            self._refs.popitem(last=False)
+            self._snaps.popitem(last=False)
+        return result
 
     def list_apps(self) -> list[str]:
         dirs = ["/Applications", "/System/Applications", "/System/Applications/Utilities",
@@ -275,6 +288,15 @@ class MacUIProvider:
             if a.activationPolicy() == AppKit.NSApplicationActivationPolicyRegular and a.localizedName():
                 names.add(a.localizedName())
         return sorted(names, key=str.lower)
+
+    def get_snapshot(self, snapshot_id: str) -> dict | None:
+        """A recent snapshot dict by id (None if expired)."""
+        return self._snaps.get(snapshot_id)
+
+    def forget(self, snapshot_id: str) -> None:
+        """Drop a snapshot (the executor discards its intermediate polling snapshots)."""
+        self._refs.pop(snapshot_id, None)
+        self._snaps.pop(snapshot_id, None)
 
     def element_ref(self, snapshot_id: str, item_id: int):
         """AXUIElement for an item id from a recent snapshot (None if expired or unknown)."""

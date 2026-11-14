@@ -22,6 +22,8 @@ Log started 2026-11-13. Updated after every phase.
 | TTSKit | 🟢 | 0.6B: first audio 133 ms, RTF 1.2 (Low Power Mode); audible playback pending |
 | Argmax local server | 🟢 | OpenAI audio API from Python, 147 ms median, SSE first event 46 ms |
 | start_all.sh | 🟢 | starts Bonsai + Argmax, both health checks pass, stop works |
+| UI provider (`mac/ui_provider.py`) | 🟢 | AX snapshots in 47–68 ms; Electron (Slack) supported; fixtures captured to `eval/fixtures/` |
+| Executor (`mac/executor.py`) | 🟢 | self-test 18/18 (Calculator + TextEdit): press, menu, type (Unicode), keys, scroll, open_app, undo, terminal / wrong-app guard |
 | Offline verification | ⏳ | needs wifi off |
 
 ---
@@ -188,7 +190,7 @@ Cloned to `~/hackathon/local-ai-hackathon-samples` @ `5c72a8d`. Summary is in "R
 - `argmax-pro-sdk/` needs a Pro key (`ax_…`) plus a registry token (`axst_…`), is untested by its author, and needs internet once for license activation. Still pending: whether you'll get a key.
 
 ## Phase 4: Offline verification
-_Pending: wifi off, then rerun everything._ `~/hackathon/start_all.sh` is written and tested online: `./start_all.sh` (fork 4B + Argmax base.en), `BONSAI=upstream|mlx`, `SIZE=…`, `STT=…`, `./start_all.sh status`, `./start_all.sh stop`. It sets `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` and loads only local paths.
+_Pending: wifi off, then rerun everything._ `~/hackathon/start_all.sh` is written and tested online: `./start_all.sh` (fork 4B + Argmax small.en), `BONSAI=upstream|mlx`, `SIZE=…`, `STT=…`, `./start_all.sh status`, `./start_all.sh stop`. It sets `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` and loads only local paths.
 
 ## Phase 5: Final status and recommendation
 _pending_

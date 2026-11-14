@@ -4,7 +4,7 @@
 #   ./start_all.sh                 # Bonsai 2 4B (PrismML fork, :8080) + Argmax STT server (:50060)
 #   BONSAI=upstream ./start_all.sh # stock Homebrew llama.cpp + Q2_0 on :8080
 #   BONSAI=mlx ./start_all.sh      # mlx-vlm server on :8081
-#   SIZE=2B|4B|9B  STT=base.en|large-v3-v20240930_626MB  ./start_all.sh
+#   SIZE=2B|4B|9B  STT=small.en|base.en|large-v3-v20240930_626MB  ./start_all.sh
 #   ./start_all.sh stop            # stop everything this script started
 #   ./start_all.sh status          # health-check only
 #
@@ -16,7 +16,7 @@ ARGMAX_MODELS="$EXT/models/argmax"
 LOGS="$EXT/logs"; mkdir -p "$LOGS"
 BONSAI="${BONSAI:-fork}"          # fork | upstream | mlx
 SIZE="${SIZE:-4B}"
-STT="${STT:-base.en}"
+STT="${STT:-small.en}"   # base.en returned empty text on real mic speech
 STT_PORT="${STT_PORT:-50060}"
 
 # Never phone home: everything below loads from local paths.
