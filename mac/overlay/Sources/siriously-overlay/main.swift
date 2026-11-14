@@ -333,6 +333,33 @@ func looksLikeCommand(_ text: String) -> Bool {
     return commandVerbs.contains(String(firstReal))
 }
 
+/// The mini brain and the teammate's brain (brain/server.py, docs/MAC_INTEGRATION.md §5) name a few fields
+/// differently. Map the brain's shapes onto the ones this file reads: route.kind -> route, plan.plan.say or the
+/// first target name -> say, action.i -> index, confirm.reason -> say.
+func normalizeEvent(_ type: String, _ d: [String: Any]) -> [String: Any] {
+    var d = d
+    func nonEmpty(_ v: Any?) -> String? { (v as? String).flatMap { $0.isEmpty ? nil : $0 } }
+    let plan = d["plan"] as? [String: Any]
+    switch type {
+    case "route":
+        if d["route"] == nil, let k = d["kind"] { d["route"] = k }
+        if (d["route"] as? String) == "none", d["say"] == nil { d["say"] = nonEmpty(d["reason"]) }
+    case "plan":
+        if nonEmpty(d["say"]) == nil {
+            let target = (d["targets"] as? [String: Any])?.values.compactMap { $0 as? String }.first
+            let act = (plan?["actions"] as? [[String: Any]])?.first
+            d["say"] = nonEmpty(plan?["say"]) ?? target ?? act.map { describe($0, label: nil) }
+        }
+    case "action":
+        if d["index"] == nil, let i = num(d["i"]) { d["index"] = i + 1 }
+    case "confirm":
+        if nonEmpty(d["say"]) == nil { d["say"] = nonEmpty(plan?["say"]) ?? nonEmpty(d["reason"]) }
+    default:
+        break
+    }
+    return d
+}
+
 final class Controller {
     let hud = HUD()
     var menu: MenuBar?
@@ -345,7 +372,7 @@ final class Controller {
     func handle(_ ev: [String: Any]) {
         guard let type = str(ev["type"]) else { return }
         let uid = str(ev["utterance_id"])
-        let data = ev["data"] as? [String: Any] ?? [:]
+        let data = normalizeEvent(type, ev["data"] as? [String: Any] ?? [:])
         let ms = num(ev["ms_since_speech_end"])
         menu?.store.record(type: type, uid: uid, data: data)
         let mine = uid == nil || uid == current

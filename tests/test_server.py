@@ -440,7 +440,10 @@ def test_openapi_documents_utterance_schema(client: TestClient) -> None:
     assert schema["required"] == ["id", "text", "speaker"]
 
 
-def test_main_mac_without_module_fails_clearly(capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_mac_without_module_fails_clearly(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "brain.mac", None)  # brain/mac.py exists: simulate a failed import
     assert main(["--mac", "--no-model"]) == 2
     assert "brain.mac" in capsys.readouterr().err
 

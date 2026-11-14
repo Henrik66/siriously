@@ -10,7 +10,7 @@ scripts/run_demo.sh start
         v WS /events        to the overlay, and to /console (debug page)
 ```
 
-`brain/mac.py` (the Mac UIProvider and MacExecutor) is Henrik's module. It is **not in `feat/brain` yet**. `--mac` needs it and exits with code 2 without it (section 3).
+`brain/mac.py` (the Mac UIProvider and MacExecutor) is a thin adapter over Henrik's Accessibility code in `mac/` (`ui_provider.py`, `executor.py`): dicts in the §4.2/§4.4 shapes, converted with `UISnapshot.from_dict` and `Action.to_dict()`. Verified on the M3: compound open+menu, dictation and planner menu picks run end to end. `mac/switch_brain.sh mini|team` swaps which brain answers on :8765.
 
 ---
 

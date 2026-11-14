@@ -12,6 +12,7 @@ dependencies = [
     # Mac UIProvider/Executor (brain.mac, Henrik): Accessibility API via pyobjc. Skipped off-Mac.
     "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",  # CGEvent keystrokes (mac/executor.py)
 ]
 
 [dependency-groups]
