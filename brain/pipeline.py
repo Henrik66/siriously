@@ -76,6 +76,12 @@ NO_VISIBLE_EFFECT_KEYS = frozenset(
 )
 
 
+# A press on one of these that changes nothing means "already selected": success, not a miss.
+SELECTION_ROLES = frozenset({"row", "cell", "outlinerow", "tab", "radiobutton", "sidebaritem", "listitem"})
+# Text inputs commonly relabel ("Message #general" -> "Message Henrik") while keeping their id.
+RELABELING_ROLES = frozenset({"textfield", "textarea", "searchfield", "combobox"})
+
+
 def _label_key(label: str) -> str:
     return label.strip().rstrip("…").removesuffix("...").strip().lower()
 
@@ -427,6 +433,8 @@ class Brain:
         elif not changed and expects_change(action, snap):
             if snap is not None and self._observe_change(snap, result):
                 changed = True
+            elif action.op == "press" and self._is_selection(action, snap):
+                pass  # already selected: nothing to change, nothing to retry
             else:
                 failure = f"{action.op} had no effect (UI unchanged)"
         self._emit(
@@ -449,6 +457,11 @@ class Brain:
             data["ask"] = list(plan.ask)
             data["labels"] = [it.display if (it := snap.item(i)) else "" for i in plan.ask]
         self._emit("plan", run.utt, data)
+
+    @staticmethod
+    def _is_selection(action: Action, snap: UISnapshot | None) -> bool:
+        item = snap.item(action.target) if snap is not None and action.target is not None else None
+        return item is not None and item.role.lower() in SELECTION_ROLES
 
     def _start_plan(self, run: _Run, plan: Plan, snapshot: UISnapshot) -> Outcome:
         if not plan.actions:
@@ -564,12 +577,24 @@ class Brain:
 
     @staticmethod
     def _rebind(
-        actions: Sequence[Action], descs: Sequence[TargetDescriptor | None], snap: UISnapshot
+        actions: Sequence[Action],
+        descs: Sequence[TargetDescriptor | None],
+        snap: UISnapshot,
+        *,
+        keep_ids: bool = False,
     ) -> tuple[Action, ...] | None:
-        """Re-bind targeted actions to ``snap`` ids by descriptor; None if any fails to resolve."""
+        """Re-bind targeted actions to ``snap`` ids by descriptor; None if any fails to resolve.
+
+        ``keep_ids`` (mid-burst only): a type target, or a text-input role, whose id survives the UI
+        change with the same kind+role is kept even if its label changed. Press/menu targets of any
+        other role must still match by descriptor, so a destructive press is never redirected.
+        """
         out: list[Action] = []
         for action, desc in zip(actions, descs, strict=True):
             if action.target is None:
+                out.append(action)
+                continue
+            if keep_ids and desc is not None and Brain._same_slot(action, desc, snap):
                 out.append(action)
                 continue
             rebound = resolve_step(FlowStep(action, desc), snap) if desc is not None else None
@@ -577,6 +602,15 @@ class Brain:
                 return None
             out.append(rebound)
         return tuple(out)
+
+    @staticmethod
+    def _same_slot(action: Action, desc: TargetDescriptor, snap: UISnapshot) -> bool:
+        item = snap.item(action.target) if action.target is not None else None
+        if item is None or item.kind != desc.kind or item.role != desc.role:
+            return False
+        if desc.bundle_id and snap.app.bundle_id and desc.bundle_id != snap.app.bundle_id:
+            return False
+        return action.op == "type" or item.role.lower() in RELABELING_ROLES
 
     def _exec_plan(
         self, run: _Run, plan: Plan, base: UISnapshot, descs: tuple[TargetDescriptor | None, ...]
@@ -596,7 +630,7 @@ class Brain:
                 run.nav = self._is_navigation(action, cur, new)
             if result.changed and new is not None and new.snapshot_id != sid and i + 1 < len(actions):
                 # the UI moved on: ids from the plan's snapshot are stale, re-bind the rest
-                rest = self._rebind(actions[i + 1 :], descs[i + 1 :], new)
+                rest = self._rebind(actions[i + 1 :], descs[i + 1 :], new, keep_ids=True)
                 if rest is None:
                     msg = "remaining targets no longer resolve after the UI changed"
                     return self._replan(run, msg, result)

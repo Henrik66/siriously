@@ -1062,3 +1062,92 @@ def test_filler_does_not_cancel_pending_confirm() -> None:
     assert sink.events[n:] == []  # no heard/error noise either
     say("yes")
     assert [a.target for a in ex.ran] == [137]
+
+
+def _slack_like(
+    sid: str, composer_label: str, row_role: str = "row", row_label: str = "Henrik"
+) -> UISnapshot:
+    return UISnapshot(
+        sid,
+        AppInfo("Slack", "com.tinyspeck.slackmacgap"),
+        items=(
+            UIItem(10, "element", row_role, row_label),
+            UIItem(20, "element", "textarea", composer_label),
+            UIItem(30, "element", "button", "Send"),
+        ),
+    )
+
+
+def test_rebind_keeps_same_id_when_text_input_relabels() -> None:
+    a = _slack_like("a", "Message #general")
+    b = _slack_like("b", "Message Henrik")
+    rig = Rig(planner=FakePlanner())
+    rig.provider.snap = a
+    rig.plan_route("dm", Plan("a", (Action.press(10), Action.type_text("hi", target=20))))
+    rig.executor.hook = lambda _s, act: (
+        ActionResult(ok=True, changed=True, snapshot=b) if act.op == "press" else None
+    )
+    rig.say("dm")
+    assert rig.executor.log[-1] == ("b", Action.type_text("hi", target=20))
+    assert rig.planner.calls == []  # type: ignore[union-attr]
+
+
+def test_rebind_does_not_keep_relabeled_press_target() -> None:
+    base = _slack_like("a", "x")
+    a = replace(base, items=(*base.items[:2], UIItem(30, "element", "button", "Archive")))
+    b = UISnapshot(
+        "b",
+        a.app,
+        items=(
+            UIItem(10, "element", "row", "Henrik"),
+            UIItem(20, "element", "textarea", "x"),
+            UIItem(30, "element", "button", "Delete"),
+        ),  # id 30 now means something else
+    )
+    rig = Rig(planner=FakePlanner([Plan("b", ())]))
+    rig.provider.snap = a
+    rig.plan_route("go", Plan("a", (Action.press(10), Action.press(30))))
+    rig.executor.hook = lambda _s, act: (
+        ActionResult(ok=True, changed=True, snapshot=b) if act.target == 10 else None
+    )
+    rig.say("go")
+    assert Action.press(30) not in rig.executor.actions
+    assert "no longer resolve" in str(rig.planner.calls[0]["error"])  # type: ignore[union-attr]
+
+
+def test_rebind_requires_same_role_for_kept_id() -> None:
+    a = _slack_like("a", "Message #general")
+    b = UISnapshot(
+        "b", a.app, items=(UIItem(10, "element", "row", "Henrik"), UIItem(20, "element", "button", "Other"))
+    )
+    rig = Rig(planner=FakePlanner([Plan("b", ())]))
+    rig.provider.snap = a
+    rig.plan_route("dm", Plan("a", (Action.press(10), Action.type_text("hi", target=20))))
+    rig.executor.hook = lambda _s, act: (
+        ActionResult(ok=True, changed=True, snapshot=b) if act.op == "press" else None
+    )
+    rig.say("dm")
+    assert Action.type_text("hi", target=20) not in rig.executor.actions
+
+
+@pytest.mark.parametrize(
+    "role", ["row", "cell", "outlinerow", "tab", "radiobutton", "sidebaritem", "listitem"]
+)
+def test_press_on_selected_item_is_success(role: str) -> None:
+    s = _slack_like("a", "x", row_role=role)
+    rig = Rig(planner=FakePlanner())
+    rig.provider.snap = s
+    rig.plan_route("go", Plan("a", (Action.press(10), Action.type_text("hi", target=20))))
+    rig.executor.hook = lambda _s, act: ActionResult(ok=True, changed=False) if act.op == "press" else None
+    rig.say("go")
+    assert rig.planner.calls == []  # type: ignore[union-attr]
+    assert rig.executor.actions == [Action.press(10), Action.type_text("hi", target=20)]
+    assert rig.types()[-1] == "done"
+
+
+def test_press_on_button_without_change_still_a_miss() -> None:
+    rig = Rig(planner=FakePlanner([Plan("a", ())]))
+    rig.plan_route("go", Plan("a", (Action.press(1),)))
+    rig.executor.hook = lambda _s, _a: ActionResult(ok=True, changed=False)
+    rig.say("go")
+    assert "no effect" in str(rig.planner.calls[0]["error"])  # type: ignore[union-attr]
