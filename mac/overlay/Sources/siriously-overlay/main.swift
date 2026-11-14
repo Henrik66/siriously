@@ -53,7 +53,64 @@ final class DrainView: NSView {
     }
 }
 
-final class RoundedEffectView: NSVisualEffectView {
+/// The HUD card: hover shows an × in place of the icon; a two-finger swipe or a drag to the right dismisses it
+/// (like a macOS notification). Clicks never activate the app (non-activating panel).
+final class CardView: RoundedEffectView {
+    var onHover: ((Bool) -> Void)?
+    var onSlide: ((CGFloat) -> Void)?                 // current horizontal offset (positive = right)
+    var onRelease: ((CGFloat, CGFloat) -> Void)?      // offset, velocity (pt per event)
+    private var offset: CGFloat = 0
+    private var lastDelta: CGFloat = 0
+    private var tracking = false
+    private var dragStart: NSPoint?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { onHover?(true) }
+    override func mouseExited(with event: NSEvent) { onHover?(false) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    private func move(by dx: CGFloat) {
+        lastDelta = dx
+        offset += dx
+        offset = max(offset, -10)                     // a little give to the left, none beyond
+        onSlide?(offset)
+    }
+    private func release() {
+        onRelease?(offset, lastDelta)
+        offset = 0; lastDelta = 0; tracking = false; dragStart = nil
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        if !event.momentumPhase.isEmpty { return }    // the swipe already decided on release
+        switch event.phase {
+        case .began:
+            tracking = abs(event.scrollingDeltaX) >= abs(event.scrollingDeltaY)
+            offset = 0
+        case .changed where tracking:
+            // Natural scrolling reports finger direction; classic scrolling the opposite.
+            let dx = event.isDirectionInvertedFromDevice ? event.scrollingDeltaX : -event.scrollingDeltaX
+            move(by: dx)
+        case .ended, .cancelled:
+            if tracking { release() }
+        default:
+            break
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) { dragStart = NSEvent.mouseLocation; offset = 0 }
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = dragStart else { return }
+        move(by: NSEvent.mouseLocation.x - start.x - offset)
+    }
+    override func mouseUp(with event: NSEvent) { if dragStart != nil { release() } }
+}
+
+class RoundedEffectView: NSVisualEffectView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         updateBorder()
@@ -71,7 +128,9 @@ enum SymbolMotion { case none, variable, pulse }
 final class HUD {
     let width: CGFloat = 320
     private let panel: NSPanel
-    private let effect = RoundedEffectView()
+    private let effect = CardView()
+    private let closeButton = NSButton()
+    var onDismiss: (() -> Void)?
     private let icon = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
@@ -87,7 +146,8 @@ final class HUD {
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false               // hover ×, swipe or drag right to dismiss
+        panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -142,6 +202,52 @@ final class HUD {
             icon.widthAnchor.constraint(equalToConstant: 16),
             row.widthAnchor.constraint(equalToConstant: width),
         ])
+        // Hovering swaps the status icon for an × (same spot, so the text never moves).
+        closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Dismiss")
+        closeButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.isBordered = false
+        closeButton.imagePosition = .imageOnly
+        closeButton.target = self
+        closeButton.action = #selector(closeClicked)
+        closeButton.alphaValue = 0
+        closeButton.toolTip = "Dismiss (or swipe right)"
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        effect.addSubview(closeButton)
+        NSLayoutConstraint.activate([
+            closeButton.centerXAnchor.constraint(equalTo: icon.centerXAnchor),
+            closeButton.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 20),
+            closeButton.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        effect.onHover = { [weak self] inside in
+            guard let self else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.15
+                self.closeButton.animator().alphaValue = inside ? 1 : 0
+                self.icon.animator().alphaValue = inside ? 0 : 1
+            }
+        }
+        effect.onSlide = { [weak self] dx in
+            guard let self, self.isShown else { return }
+            let base = self.targetFrame()
+            self.panel.setFrameOrigin(NSPoint(x: base.minX + dx, y: base.minY))
+            self.panel.alphaValue = max(0.25, 1 - max(0, dx) / (self.width * 0.9))
+        }
+        effect.onRelease = { [weak self] dx, v in
+            guard let self, self.isShown else { return }
+            if dx > 70 || (dx > 20 && v > 6) {
+                self.dismiss()
+            } else {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.2
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    self.panel.animator().setFrame(self.targetFrame(), display: true)
+                    self.panel.animator().alphaValue = 1
+                }
+            }
+        }
+
         drainView.translatesAutoresizingMaskIntoConstraints = false
         drainView.isHidden = true
         effect.addSubview(drainView)
@@ -215,6 +321,31 @@ final class HUD {
              tint: tint, hideAfter: hideAfter)
     }
 
+    @objc private func closeClicked() { dismiss() }
+
+    /// Slide out to the right (user dismissed it). The running task is not affected.
+    func dismiss() {
+        guard isShown else { return }
+        hideItem?.cancel()
+        stopDrain()
+        isShown = false
+        onDismiss?()
+        var f = panel.frame
+        f.origin.x = (NSScreen.screens.first ?? NSScreen.main!).frame.maxX + 10
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().setFrame(f, display: true)
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, !self.isShown else { return }
+            self.panel.orderOut(nil)
+            self.icon.removeAllSymbolEffects()
+            self.icon.alphaValue = 1
+            self.closeButton.alphaValue = 0
+        })
+    }
+
     func hide() {
         hideItem?.cancel()
         stopDrain()
@@ -264,7 +395,9 @@ final class HUD {
 
     private func fadeIn() {
         isShown = true
-        var f = panel.frame
+        icon.alphaValue = 1
+        closeButton.alphaValue = 0
+        var f = targetFrame()
         f.origin.y += 4                                     // settle 4 px downwards while fading in
         panel.setFrame(f, display: false)
         panel.orderFrontRegardless()
@@ -364,10 +497,20 @@ final class Controller {
     let hud = HUD()
     var menu: MenuBar?
     private var current: String?
+    private var dismissed: String?                    // utterance whose card the user swiped away
     private var busyUntil = Date.distantPast
     private var listening = false
 
     private var busy: Bool { Date() < busyUntil }
+
+    init() {
+        hud.onDismiss = { [weak self] in
+            guard let self else { return }
+            self.dismissed = self.current
+            self.busyUntil = .distantPast
+            self.listening = false
+        }
+    }
 
     func handle(_ ev: [String: Any]) {
         guard let type = str(ev["type"]) else { return }
@@ -375,6 +518,7 @@ final class Controller {
         let data = normalizeEvent(type, ev["data"] as? [String: Any] ?? [:])
         let ms = num(ev["ms_since_speech_end"])
         menu?.store.record(type: type, uid: uid, data: data)
+        if let uid, uid == dismissed, !["confirm", "ask"].contains(type) { return }   // swiped away: stay quiet
         let mine = uid == nil || uid == current
 
         switch type {
