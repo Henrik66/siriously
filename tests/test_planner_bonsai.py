@@ -205,3 +205,29 @@ def test_frontmost_app_is_never_an_open_target() -> None:
         (), SETTINGS, transport=FakeTransport(completion('{"a":[{"open":"notes"},{"menu":101}]}'))
     )
     assert free.plan("open notes", notes_snapshot()).actions == (Action.menu(101),)
+
+
+def test_timeout_s_caps_the_call_below_settings() -> None:
+    t = FakeTransport(completion('{"a":[{"menu":101}]}'))
+    _planner(t).plan("new note", notes_snapshot(), timeout_s=1.5)
+    assert 1.4 < t.calls[0][2] <= 1.5  # SETTINGS.bonsai_timeout_s is 3.0
+    t2 = FakeTransport(completion('{"a":[{"menu":101}]}'))
+    _planner(t2).plan("new note", notes_snapshot(), timeout_s=60.0)
+    assert t2.calls[0][2] <= 3.0  # never above settings
+
+
+def test_no_budget_left_raises_timeout_without_calling_server() -> None:
+    t = FakeTransport()
+    with pytest.raises(PlannerError) as exc:
+        _planner(t).plan("new note", notes_snapshot(), timeout_s=0.0)
+    assert exc.value.kind == "timeout" and t.calls == []
+
+
+def test_retry_respects_the_reduced_deadline() -> None:
+    err = urllib.error.URLError(ConnectionRefusedError())
+    t = FakeTransport(err, completion('{"a":[{"menu":101}]}'))
+    p = _planner(t)
+    p.client.backoff_s = 0.0
+    with pytest.raises(PlannerError) as exc:  # 0.3 s left: no room for a retry (min 0.5 s)
+        p.plan("new note", notes_snapshot(), timeout_s=0.3)
+    assert exc.value.kind == "down" and len(t.calls) == 1

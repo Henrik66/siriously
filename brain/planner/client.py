@@ -149,10 +149,20 @@ class BonsaiClient:
             b["response_format"] = response_format
         return b
 
-    def chat(self, messages: Sequence[JSON], response_format: JSON | None = None) -> ChatResult:
+    def chat(
+        self,
+        messages: Sequence[JSON],
+        response_format: JSON | None = None,
+        *,
+        timeout_s: float | None = None,
+    ) -> ChatResult:
+        """One completion. ``timeout_s`` caps this call below the client's ``timeout_s`` (retry included)."""
+        budget = self.timeout_s if timeout_s is None else min(self.timeout_s, timeout_s)
+        if budget <= 0:
+            raise PlannerError("timeout", "no time left for a planner call")
         payload = json.dumps(self.body(messages, response_format)).encode("utf-8")
         t0 = time.perf_counter()
-        data = self._post(payload, deadline=t0 + self.timeout_s)
+        data = self._post(payload, deadline=t0 + budget)
         ms = (time.perf_counter() - t0) * 1000.0
         try:
             raw = json.loads(data)
@@ -173,11 +183,11 @@ class BonsaiClient:
                 err = PlannerError("http", f"HTTP {e.code} from {self.url}")
                 retryable = e.code >= 500
             except TimeoutError as e:
-                raise PlannerError("timeout", f"no reply within {self.timeout_s:.1f}s") from e
+                raise PlannerError("timeout", "no reply before the call deadline") from e
             except (urllib.error.URLError, http.client.HTTPException, OSError) as e:
                 reason = getattr(e, "reason", e)
                 if isinstance(reason, TimeoutError | socket.timeout):
-                    raise PlannerError("timeout", f"no reply within {self.timeout_s:.1f}s") from e
+                    raise PlannerError("timeout", "no reply before the call deadline") from e
                 err = PlannerError("down", f"cannot reach {self.url}: {reason!r}")
                 retryable = True
             pause = self.backoff_s * (2**attempt)

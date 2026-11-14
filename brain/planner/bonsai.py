@@ -95,7 +95,10 @@ class BonsaiPlanner:
         *,
         hint: str | None = None,
         error: str | None = None,
+        timeout_s: float | None = None,
     ) -> Plan:
+        """Plan one burst. ``timeout_s`` (the caller's remaining budget) caps this call below
+        ``settings.bonsai_timeout_s``; waiting for a busy planner counts against it too."""
         ranked = rank_items(text, snapshot, self.k)
         # The frontmost app is never an open_app target: re-opening it is a no-op that stalls
         # continuations ("open notes and …" planned again once Notes is already in front).
@@ -109,10 +112,16 @@ class BonsaiPlanner:
             "items_shown": float(len(shown)),
             "suffix_tokens_est": float(estimate_tokens(suffix)),
         }
+        budget = self.settings.bonsai_timeout_s
+        if timeout_s is not None:
+            budget = min(budget, timeout_s)
         t0 = time.perf_counter()
         try:
-            with self._locked(self.settings.bonsai_timeout_s):
-                result = self.client.chat(build_messages(suffix), response_format(schema))
+            with self._locked(budget):
+                remaining = budget - (time.perf_counter() - t0)
+                result = self.client.chat(
+                    build_messages(suffix), response_format(schema), timeout_s=remaining
+                )
         except PlannerError:
             stats["ms"] = (time.perf_counter() - t0) * 1000.0
             stats["failed"] = 1.0
