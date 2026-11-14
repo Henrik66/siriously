@@ -223,9 +223,21 @@ Flags: `--bonsai-url`, `--no-model`, `--repeat`, `--ttft-runs` (default 5), `--o
 
 **Levers, cheapest first:**
 
-1. Most commands should never reach the model. Check `route.kind` in the overlay: a `planner` route for a command that should be fast is a bug in the fast path or the eval, so fix it there.
-2. Fewer items shown: `BonsaiPlanner(k=10)` instead of the default 15.
-3. Keep `SIRIOUSLY_BONSAI_TIMEOUT_S` at 6 or more, so a slow plan does not become an error.
+1. Run plugged in with Low Power Mode off. The SETUP_REPORT numbers below are Low Power Mode on battery.
+2. Most commands should never reach the model. Check `route.kind` in the overlay: a `planner` route for a command that should be fast is a bug in the fast path or the eval, so fix it there.
+3. MTP speculative decoding on the PrismML fork, server-side only. Greedy speculative decoding gives identical output, so accuracy is unchanged, and decode is about 45% of a plan. Use `Ternary-Bonsai-2-4B-PQ2_0-MTP-Q8_0.gguf` with `--spec-type draft-mtp --spec-draft-n-max 2`, per the model card's USAGE.md. Untested: whether the fork combines MTP with `json_schema` grammars. Verify with `planner_bench.py` and `python -m eval.run_eval --e2e` before using it in the demo.
+4. Keep `SIRIOUSLY_BONSAI_TIMEOUT_S` at 6 or more, so a slow plan does not become an error.
+
+**Measured, do not do:** shrinking the prompt costs accuracy. Same-snapshot A/Bs on the dev box against HEAD at 74/77:
+
+| Change | Prompt tokens | Accuracy |
+|---|---|---|
+| Fewer items (k=10) | — | lower |
+| Drop quotes around labels | -22 | 71/77 |
+| Drop shortcuts and quotes | -62 | 68/77, prompt time only -7% |
+| Fixed, utterance-independent item block (to cache/prefill per screen) | — | 67/77 |
+
+The model needs relevance-ordered items with quoted labels and shortcuts. Keep k=15 and the quoted format.
 
 Other measurements from SETUP_REPORT (M3, Low Power Mode on, battery, worst case): time to first token 270 to 355 ms, decode 14 to 16 tokens/s, prompt processing 78 to 103 tokens/s in the smoke tests (PRD section 7 estimates 100 to 150). At that rate a 300-token suffix costs 2 to 3 s, which is why the suffix is capped at 150 tokens and the prefix is cached.
 
