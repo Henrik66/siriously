@@ -6,7 +6,7 @@
 //   → POST http://127.0.0.1:8765/utterance {id, text, t_speech_end, stt_ms, speaker{verified, score, name}}
 //
 // Commands:
-//   siriously-ear run        [--mic NAME] [--brain URL] [--no-lock] [--threshold X] [--silence-ms 600] [--save-audio]
+//   siriously-ear run        [--mic NAME] [--brain URL] [--no-lock] [--threshold X] [--silence-ms 800] [--save-audio]
 //   siriously-ear enroll     [--n 10] [--mic NAME]      record N short phrases from you, then calibrate
 //   siriously-ear calibrate  [--others a.wav ...]       rebuild the voiceprint from saved clips
 //   siriously-ear score      a.wav b.wav ...            voice-lock score + transcript per file
@@ -41,7 +41,7 @@ struct Options {
     var voiceprint = "\(stateDir)/voiceprint.json"
     var threshold: Float?
     var noLock = false
-    var silenceMs = 600
+    var silenceMs = 800          // 600 split "look up … places in New York" at a natural pause
     var saveAudio = false
     var n = 10
     var others: [String] = []
@@ -51,7 +51,7 @@ struct Options {
 func usage() -> Never {
     print("""
     usage: siriously-ear run|enroll|calibrate|score|devices [options]
-      run        [--mic NAME] [--brain URL] [--no-lock] [--threshold X] [--silence-ms 600] [--save-audio] [--stt small.en]
+      run        [--mic NAME] [--brain URL] [--no-lock] [--threshold X] [--silence-ms 800] [--save-audio] [--stt small.en]
       enroll     [--n 10] [--mic NAME]
       calibrate  [--others a.wav ...]
       score      file.wav ...
@@ -404,7 +404,7 @@ final class OverlayEvents {
 
 // MARK: - brain client
 
-struct Speaker: Codable { let verified: Bool; let score: Float?; let name: String }
+struct Speaker: Codable { let verified: Bool; let score: Float?; let name: String; let threshold: Float? }
 struct Utterance: Codable {
     let id: String
     let text: String
@@ -564,7 +564,8 @@ func runDaemon(_ ear: Ear) async throws {
         let thr = opt.threshold ?? vp?.threshold ?? 0
         let verified = vp == nil ? true : (score.map { $0 >= thr } ?? false)
         let u = Utterance(id: id, text: text, tSpeechEnd: end.timeIntervalSince1970, sttMs: sttMs,
-                          speaker: Speaker(verified: verified, score: score, name: verified ? (vp?.name ?? "anyone") : "unknown"),
+                          speaker: Speaker(verified: verified, score: score, name: verified ? (vp?.name ?? "anyone") : "unknown",
+                                           threshold: vp == nil ? nil : thr),
                           audioS: secs, lockMs: lockMs)
         var evData: [String: Any] = ["text": text, "verified": verified]
         if let score { evData["score"] = Double(score) }

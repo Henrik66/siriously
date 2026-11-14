@@ -40,9 +40,12 @@ Rules:
 - Use only ids that are listed; the best matches are listed first. If a menu item matches the request, use it.
 - Prefer a listed menu item or a well-known shortcut over clicking.
 - At most 6 actions. Do only what was asked.
-- After open_app the list still shows the OLD app, so continue with keys/type, not ids.
+- If the request is about a different app than the one shown, start with open_app. You will then see that app's
+  screen and can continue. After open_app the list still shows the OLD app, so use keys/type, not ids.
+- Lines starting with DONE are steps already completed: do not repeat them. If nothing is left, return no actions.
 - If the request cannot be done with these ops, return no actions and say why in a few words.
-- "say" is a 2 to 6 word summary for the user, like "New folder “receipts”"."""
+- "say" is a 2 to 6 word imperative summary of what you are about to do, like "Send “hello” to Hari" or
+  "New folder “receipts”". Never past tense ("Sent", "Moved"). Quote user text with “ ”."""
 
 # Few-shot turns: (screen + request, plan). Part of the cached static prefix.
 EXAMPLES = [
@@ -65,12 +68,31 @@ USER: search for weather in ithaca""",
 USER: open safari and go to github.com""",
      {"say": "Open github.com in Safari", "actions": [{"op": "open_app", "app": "Safari"}, {"op": "keys", "keys": "cmd+l"},
                                                      {"op": "type", "text": "github.com"}, {"op": "keys", "keys": "return"}]}),
+    ("""APP: Terminal | WINDOW: zsh
+2 button "Close window"
+USER: open the bluetooth settings""",
+     {"say": "Open Bluetooth settings", "actions": [{"op": "open_app", "app": "System Settings"}]}),
+    ("""APP: System Settings | WINDOW: General
+4 searchfield "Search"
+68 menu "View › Bluetooth"
+9 row "General"
+DONE: open_app System Settings
+USER: open the bluetooth settings""",
+     {"say": "Open Bluetooth settings", "actions": [{"op": "menu", "target": 68}]}),
+    ("""APP: Messages | WINDOW: Messages
+3 searchfield "Search"
+10 textfield "iMessage" = ""
+44 menu "File › New Message" (cmd+n)
+USER: text hari hello""",
+     {"say": "Send “hello” to Hari", "actions": [{"op": "menu", "target": 44}, {"op": "type", "text": "Hari"},
+                                                 {"op": "keys", "keys": "return"}, {"op": "type", "text": "hello"},
+                                                 {"op": "keys", "keys": "return"}]}),
     ("""APP: Slack | WINDOW: general (Channel) - Hackathon
 8 button "Huddle"
 14 textarea "Message #general" = ""
 22 row "random"
 USER: tell the channel I'm running five minutes late""",
-     {"say": "Message #general", "actions": [{"op": "type", "text": "I'm running five minutes late", "target": 14},
+     {"say": "Post “I'm running five minutes late”", "actions": [{"op": "type", "text": "I'm running five minutes late", "target": 14},
                                              {"op": "keys", "keys": "return"}]}),
     ("""APP: System Settings | WINDOW: Wi‑Fi
 4 searchfield "Search"

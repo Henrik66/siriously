@@ -47,11 +47,36 @@ KEYS = {"new tab": "cmd+t", "close tab": "cmd+w", "close window": "cmd+w", "clos
         "press enter": "return", "press return": "return", "enter": "return", "escape": "esc",
         "find": "cmd+f", "search": "cmd+f"}
 FILLER = re.compile(r"^(hey |ok |okay )?(siri(ously)?[, ]+)?(please |can you |could you )?")
-YES = re.compile(r"^(yes|yeah|yep|yup|sure|confirm|confirmed|do it|go ahead|ok|okay|send it|go)( please)?$")
+YES_WORDS = {"yes", "yeah", "yep", "yup", "sure", "confirm", "confirmed", "ok", "okay", "absolutely", "correct",
+             "affirmative"}
+NO_WORDS = {"no", "nope", "cancel", "stop", "don't", "dont", "never", "nah", "wait"}
+CONFIRM_SLACK = 0.5      # a "yes" may score this much below the voice-lock threshold (one-word clips score low)
 CHAT_APPS = {"Slack", "Messages", "Mail", "Discord", "WhatsApp", "Microsoft Teams", "Telegram", "Signal", "Outlook"}
-RISKY = re.compile(r"\b(send|post|reply|forward|delete|trash|empty|erase|remove|quit|shut ?down|restart|log ?out|"
+# Irreversible or outward-facing only. Move to Trash (undoable) and quitting an app (it asks about unsaved work) don't ask.
+RISKY = re.compile(r"\b(send|post|reply|forward|delete|empty|erase|shut ?down|restart|log ?out|"
                    r"buy|purchase|pay|order|uninstall|format|unsubscribe|submit)\b")
-RISKY_KEYS = {"cmd+q", "cmd+delete", "cmd+backspace", "cmd+shift+delete", "cmd+option+esc", "cmd+shift+q"}
+RISKY_KEYS = {"cmd+shift+delete", "cmd+option+shift+delete", "cmd+option+esc", "cmd+shift+q", "cmd+option+delete"}
+PAST = {"sent": "Send", "moved": "Move", "deleted": "Delete", "created": "Create", "opened": "Open", "closed": "Close",
+        "emptied": "Empty", "posted": "Post", "replied": "Reply", "forwarded": "Forward", "searched": "Search",
+        "sending": "Send", "deleting": "Delete", "moving": "Move", "creating": "Create", "searching": "Search",
+        "opening": "Open", "posting": "Post", "replying": "Reply"}
+
+
+def is_yes(t):
+    w = t.split()
+    if not w or w[0] in NO_WORDS:
+        return False
+    return w[0] in YES_WORDS or t.startswith(("do it", "go ahead", "send it")) or \
+        (len(w) <= 8 and any(x in YES_WORDS for x in w) and not any(x in NO_WORDS for x in w))
+
+
+def tidy_say(say):
+    """Imperative, curly quotes: "Sent 'hello'" -> "Send “hello”"."""
+    say = re.sub(r"['\"]([^'\"]+)['\"]", r"“\1”", (say or "").strip())
+    w = say.split(" ", 1)
+    if w and w[0].lower() in PAST:
+        say = PAST[w[0].lower()] + (" " + w[1] if len(w) > 1 else "")
+    return say
 
 
 def emit(kind, uid, data=None, t_end=None):
@@ -115,6 +140,22 @@ def fast_path(t, snap, apps):
     return None, None
 
 
+APP_ALIASES = [(r"\b(system )?settings\b|\bpreferences\b", "System Settings"), (r"^text\b|\bimessage\b", "Messages")]
+
+
+def mentioned_app(t, apps):
+    """App the request is about, if it says so: "... in Safari", "open the bluetooth settings", "text hari hello".
+    Only explicit mentions (alias, or app name after in/on/using/with/from/open/to) so 'the weather' != Weather."""
+    for pat, app in APP_ALIASES:
+        if re.search(pat, t) and app in apps:
+            return app
+    for name in sorted(apps, key=len, reverse=True):
+        n = re.escape(name.lower())
+        if re.search(rf"\b(in|on|using|with|from|open|launch|to)\s+(the\s+)?{n}( app)?\b", t):
+            return name
+    return None
+
+
 def needs_confirm(text, snap, actions):
     labels = {i["id"]: i["label"] for i in snap["items"]}
     apps = {snap["app"]["name"]} | {a.get("app", "") for a in actions if a["op"] == "open_app"}
@@ -156,15 +197,19 @@ class Brain:
     def handle(self, u):
         uid, text, t_end = u.get("id"), u.get("text", ""), u.get("t_speech_end")
         sp = u.get("speaker", {})
-        if not sp.get("verified"):
-            log(f"✗ ignored (voice lock, score {sp.get('score')}): {text!r}")
-            return
         t = norm(text)
+        if not sp.get("verified"):
+            score, thr = sp.get("score"), sp.get("threshold")
+            near = score is not None and thr is not None and score >= thr - CONFIRM_SLACK
+            if not (self.pending and is_yes(t) and near):
+                log(f"✗ ignored (voice lock, score {score}): {text!r}")
+                return
+            log(f"   accepting short confirmation {text!r} (score {score:.2f}, threshold {thr:.2f})")
 
         # 1. pending confirmation
         if self.pending:
             p, self.pending = self.pending, None
-            if time.time() - p["t"] < CONFIRM_TIMEOUT and YES.match(t):
+            if time.time() - p["t"] < CONFIRM_TIMEOUT and is_yes(t):
                 log(f"✓ {text!r} -> confirmed: {p['say']}")
                 emit("plan", uid, {"say": p["say"], "steps": len(p["actions"])})   # overlay follows this utterance
                 ok, err, _ = self.execute(uid, p["actions"], p["sid"])
@@ -175,7 +220,7 @@ class Brain:
                 return
             log(f"   pending '{p['say']}' cancelled by {text!r}")
             emit("done", uid, {"say": "Cancelled"})
-            if re.match(r"^(no|nope|cancel|stop|never mind|nevermind|don't)\b", t):
+            if not t or t.split()[0] in NO_WORDS or t.startswith("never mind"):
                 return
 
         snap = self.ui.snapshot()
@@ -191,10 +236,18 @@ class Brain:
             log(f"     done {(time.time() - t_end) * 1000:.0f} ms after you stopped talking")
             return
 
-        # 3. planner
+        # 3. planner. If the request names another app, open it first so the planner sees the right screen.
         log(f"✓ {text!r} -> planner  [in {snap['app']['name']}]")
         emit("route", uid, {"route": "planner"})
         done, error, steps = [], None, 0
+        target_app = mentioned_app(t, self.apps)
+        if target_app and target_app != snap["app"]["name"]:
+            ok, err, snap2 = self.execute(uid, [{"op": "open_app", "app": target_app}], snap["snapshot_id"])
+            if not ok:
+                emit("error", uid, {"message": err})
+                return
+            snap, steps = snap2, 1
+            done.append(f"open_app {target_app}")
         for rnd in range(MAX_ROUNDS):
             try:
                 p = planner.plan(text, snap, done, error)
@@ -213,7 +266,7 @@ class Brain:
                 return
             if needs_confirm(text if rnd == 0 else "", snap, acts):
                 return self.ask(uid, p["say"], acts, snap)
-            emit("plan", uid, {"say": p["say"], "steps": steps + len(acts)})
+            emit("plan", uid, {"say": tidy_say(p["say"]), "steps": steps + len(acts)})
             # After open_app, ids of the old app are meaningless: stop there and re-plan in the new app.
             cut = len(acts)
             for k, a in enumerate(acts):
@@ -228,7 +281,7 @@ class Brain:
                          for a in acts[:cut]][:-1]
                 error = err
                 continue
-            if cut < len(acts):
+            if cut < len(acts) or acts[-1]["op"] == "open_app":
                 done.append(f"open_app {acts[cut - 1]['app']}")
                 error = None
                 continue
@@ -238,6 +291,7 @@ class Brain:
         emit("error", uid, {"message": error or "Gave up after 3 tries"})
 
     def ask(self, uid, say, acts, snap):
+        say = tidy_say(say)
         self.pending = {"uid": uid, "say": say, "actions": acts, "sid": snap["snapshot_id"], "t": time.time()}
         log(f"     needs confirmation: {say!r} {json.dumps(acts, ensure_ascii=False)}")
         emit("confirm", uid, {"say": (say or "Do it").rstrip("?") + "?"})
