@@ -179,8 +179,9 @@ Run the actions of a burst in order. After any action with `changed=false` when 
 | Battery + Low Power Mode | everything ~2.5–3× slower | demo plugged in, Low Power Mode = Never |
 | JSON-schema output | works on llama-server (grammar) and mlx-vlm (llguidance) | 6/6 fields correct in our test |
 | Factual reliability at 4B, thinking off | wrong on 2 of 3 simple definition questions | use it to choose and format, not for facts |
-| Argmax STT server | large-v3 turbo 626 MB: **~1.1 s** for a 9 s real-mic clip, accurate. `base.en` is fast but returned **empty text on real mic speech** (it only worked on synthetic voices) | OpenAI `/v1/audio/transcriptions` on :50060. Henrik is picking the final STT model; budget ~0.3–1.1 s for STT in the end-to-end latency |
-| SpeakerKit voiceprint | 256-d per speaker per run; ~0.3 s per 8–14 s clip | mean-centered cosine: same voice ≥ 0.54, different ≤ 0.09 (synthetic voices; real-voice test pending) |
+| Argmax STT server, other models | large-v3 turbo: 0.8–1.1 s for a 9 s clip (accurate); `base.en`: **empty text on real mic speech** | OpenAI `/v1/audio/transcriptions` on :50060. Budget ~0.3–0.5 s for STT end to end |
+| SpeakerKit voiceprint (voice lock) | 256-d per speaker per run; ~0.3 s per clip | **Real mic, 2 people, 10 short commands:** enrolling with long paragraphs **fails** (clip length dominates the embedding). Enrolling with **short phrases** (like-for-like, mean-centered, score = sim(Henrik) − sim(other), threshold ≈ −0.3) gave **10/10 correct**, margin +0.59 (leave-one-out). Small sample; the other voice was farther from the mic. Henrik owns the threshold; the brain only reads `speaker.verified` |
+| STT `small.en` on real commands | **10/10 commands transcribed exactly**; ~0.43 s for a 9 s clip via server | chosen STT model for the speech daemon |
 | Bonsai 4B server memory | ~1.3 GB | fine alongside STT on 16 GB |
 
 ## 8. Your local setup (Windows/Linux)

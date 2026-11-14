@@ -10,15 +10,15 @@ Log started 2026-11-13. Updated after every phase.
 |---|---|---|
 | Storage location | 🟡 | external drive lost → everything in `~/hackathon` on the internal disk |
 | Command Line Tools | 🟢 | 26.6, Swift 6.3.3, macOS SDK 26.5 |
-| Power state | 🔴 | **on battery with Low Power Mode ON**: every speed number so far is worst case |
+| Power state | 🟢 | plugged in, Low Power Mode = Never (since 12:30 Sat). Low Power Mode numbers below are marked |
 | Bonsai 2 4B (llama.cpp fork, PQ2_0) | 🟢 | all smoke checks pass; ~15.6 tok/s (Low Power Mode) |
 | Bonsai 2 4B (stock llama.cpp, Q2_0) | 🟢 | all checks pass; fork not required |
 | Bonsai 2 4B (MLX / mlx-vlm) | 🟢 | all checks pass; ~13.9 tok/s (Low Power Mode) |
-| Bonsai 2B / 9B | ⏳ | awaiting download approval |
+| Bonsai 2B | 🟢 | PQ2_0 + Q2_0 downloaded; fork: TTFT 84 ms, 86 tok/s, ALL PASS. 9B not downloaded |
 | LM Studio | ⏳ | app installed; needs one GUI launch |
-| WhisperKit STT | 🟢 | file STT works (base.en 0.86 s CLI / 147 ms server for 6.1 s clip); live mic test pending |
+| WhisperKit STT | 🟢 | **small.en: 10/10 real commands exact**, ~0.43 s per 9 s clip (server). base.en fails on real mic (empty). Live `--stream` mode not tested |
 | SpeakerKit diarization | 🟢 | synthetic 2-voice clip correct; real 2-person clip pending |
-| Speaker embeddings (go/no-go) | 🟡 | **promising**: 256-d centroids, cross-run matching works on synthetic voices with mean-centering; real voices pending |
+| Speaker embeddings (go/no-go) | 🟡 | **PARTIAL**: long-paragraph enrollment fails on real voices (clip length dominates). Short-phrase enrollment + centering separated 10/10 commands (margin +0.59), but the sample is small and mic distance is a confound |
 | TTSKit | 🟢 | 0.6B: first audio 133 ms, RTF 1.2 (Low Power Mode); audible playback pending |
 | Argmax local server | 🟢 | OpenAI audio API from Python, 147 ms median, SSE first event 46 ms |
 | start_all.sh | 🟢 | starts Bonsai + Argmax, both health checks pass, stop works |
@@ -159,6 +159,27 @@ Results JSON: `~/hackathon/smoke/results/bonsai_*.json`.
 - Naming speakers inside a 2-voice clip (diarized separately) against enrolled voiceprints: both speakers matched correctly. Raw: Daniel 0.884 vs 0.816 runner-up, Samantha 0.898 vs 0.810. Centered: 0.637 vs −0.370 and 0.622 vs −0.073.
 - Caveats: macOS `say` voices are easier than real people. The mean for centering must come from a **background set** (with 2 enrolled people, centering on their own mean forces their prints to be opposites). Decide by nearest voiceprint plus a margin over the runner-up, not one fixed raw threshold.
 - Verdict so far: **PARTIAL → promising**. Final verdict needs real mic recordings (two takes of you + a second voice + a 2-person clip).
+
+### Plugged-in rerun (12:33, AC power, Low Power Mode off): `smoke/bench_bonsai.sh`
+| Model / runtime | TTFT | decode tok/s | llama-bench pp512 / tg128 |
+|---|---|---|---|
+| 4B fork PQ2_0 | 215 ms | 37.3 | 330 / 41.5 |
+| 4B upstream Q2_0 | 172 ms | 35.6 | 321 / 41.1 |
+| 4B MLX | 180 ms | 37.1 | — |
+| 2B fork PQ2_0 | 84 ms | 85.7 | 863 / 87.6 |
+| 2B upstream Q2_0 | 113 ms | 50.4 | 831 / 72.7 |
+All ALL PASS (chat + JSON schema). Low Power Mode cost ~2.5–3×.
+
+### STT model choice on real mic speech (9 s clip, `whisperkit-cli serve`)
+small.en 431 ms ✅ accurate · large-v3 turbo (1.5 GB) 802 ms ✅ · large-v3 626 MB 1.1 s ✅ · base.en ❌ empty output (even after loudness normalization). Mic capture: ffmpeg avfoundation mislabels the 96 kHz built-in mic (clips ~45% of the requested length and garbled), so `smoke/record.sh` and `voice_session.py` use PortAudio (sounddevice) instead.
+
+### (c) Speaker embeddings: real voices (`smoke/voice_session.py`, 12:51)
+- Data: Henrik 2×15 s paragraphs + 5 commands; second voice 1×15 s + 5 commands; 30 s conversation. Built-in mic, hackathon room.
+- **Long-paragraph enrollment vs 4 s commands: NO.** All commands nearest to "other". The embedding similarity is dominated by clip length: commands vs commands 0.81–0.97 regardless of speaker; paragraph vs paragraph 0.69–0.89; across lengths 0.41–0.67.
+- **Short-phrase enrollment (leave-one-out over commands):** raw 10/10 but margin +0.031. Centered on the mean of short clips, score = sim(Henrik) − sim(other): Henrik min −0.025 vs other max −0.613 → threshold ≈ −0.3 separates **10/10, margin +0.59**.
+- Confounds: n = 10 from one session; the second voice was farther from the mic (−37 vs −28 dBFS, SNR proxy 22 vs 31–35 dB), so the score may partly measure distance.
+- **Verdict: PARTIAL.** Usable for the demo if enrollment uses 8–10 short phrases and the threshold is calibrated on the day. Plan B: a dedicated short-utterance speaker-verification model.
+- STT side: small.en transcribed all 10 commands exactly.
 
 ## Phase 3: Hackathon sample repo
 Cloned to `~/hackathon/local-ai-hackathon-samples` @ `5c72a8d`. Summary is in "Research findings" above. What it changes:
