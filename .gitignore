@@ -32,5 +32,4 @@ __pycache__/
 smoke/clips/real/
 smoke/results/voice_session_*.json
 
-# Real UI snapshots contain on-screen personal content; share privately until reviewed
-eval/fixtures/*.json
+# eval/fixtures/*.json are committed: repo is private (contains on-screen personal content)
