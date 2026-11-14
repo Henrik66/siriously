@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol, cast
 
-from brain.addressing import FollowUp, Prefs, sounds_like_command, strip_wake, verdict
+from brain.addressing import CATEGORY_LABELS, FollowUp, Prefs, sounds_like_command, strip_wake, verdict
 from brain.choice import parse_choice
 from brain.config import Settings
 from brain.contracts import (
@@ -36,6 +36,7 @@ from brain.fastpath import same_app
 from brain.flows import Flow, FlowStep, FlowStore, resolve_step
 from brain.router import is_filler
 from brain.safety import confirm_reason, normalize_keys
+from brain.skills import Resume, match_skill
 
 logger = logging.getLogger("brain.pipeline")
 
@@ -169,6 +170,7 @@ class _Pending:
     done: tuple[FlowStep, ...] = ()  # steps already run in this utterance (for "call that X")
     n_actions: int = 0
     replans: int = 0
+    on_cancel: tuple[Action, ...] = ()  # run when the user declines (e.g. clear a typed message)
 
 
 @dataclass
@@ -179,6 +181,16 @@ class _PendingAsk:
     ids: tuple[int, ...]
     labels: tuple[str, ...]
     descs: tuple[TargetDescriptor, ...]
+    created: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class _PendingQuestion:
+    """A skill's free-text question ("Which Hari?", "What should I send?") awaiting the next utterance."""
+
+    say: str
+    options: tuple[str, ...]
+    resume: Resume
     created: float = field(default_factory=time.monotonic)
 
 
@@ -235,6 +247,7 @@ class Brain:
         # utterance is a command and brain.safety alone decides confirmations (dev, eval, tests).
         self._prefs = prefs
         self._follow = FollowUp()
+        self._question: _PendingQuestion | None = None
 
     # ------------------------------------------------------------------ public
 
@@ -298,7 +311,7 @@ class Brain:
         assert self._prefs is not None
         prefs = self._prefs
         woke, body = strip_wake(utt.text, prefs.wake_rx())
-        active = self._pending is not None or self._ask is not None
+        active = self._pending is not None or self._ask is not None or self._question is not None
         busy = self._lock.locked()
         word = _control_word(body)
         short = len(body.split()) <= 4
@@ -359,6 +372,7 @@ class Brain:
             self._stop_mono = max(self._stop_mono, min(mono, time.monotonic()))
             self._pending = None
             self._ask = None
+            self._question = None
 
     def _handle_stop(self, utt: Utterance, received: float) -> Route:
         """Stop must never wait for the utterance lock."""
@@ -394,8 +408,9 @@ class Brain:
             logger.info("ignoring filler utterance %s: %r", utt.id, utt.text)
             return Route(kind="none", reason="empty or filler utterance")
         if word not in _PRESERVE_PENDING:
-            self._pending = None  # a new command/teach/undo invalidates any "are you sure?"
+            self._drop_pending()  # a new command/teach/undo invalidates any "are you sure?"
         ask, self._ask = self._ask, None  # any utterance consumes the pending question
+        question, self._question = self._question, None
         self._emit("heard", utt, {"text": utt.text, "speaker": utt.speaker.to_dict()})
         deadline = t0 + self._settings.utterance_timeout_s
         run = _Run(utt, utt.text, "control" if word else "none", deadline, gen=gen)
@@ -404,9 +419,23 @@ class Brain:
             self._emit("route", utt, {"kind": "control", "reason": "", "ms": 0.0, "control": word})
             self._handle_control(run, route, t0)
             return route
+        if question is not None and time.monotonic() - question.created <= self._settings.confirm_ttl_s:
+            route = Route(kind="fastpath", reason="answer")
+            self._emit("route", utt, {"kind": "fastpath", "reason": "answer", "ms": 0.0})
+            run.kind = "fastpath"
+            self._finish(run, question.resume(run, utt.text), t0)
+            return route
         snapshot = self._provider.snapshot()
         if ask is not None and (answered := self._answer_ask(run, ask, snapshot, t0)) is not None:
             return answered
+        if self._prefs is not None and (call := match_skill(utt.text, snapshot)) is not None:
+            route = Route(kind="fastpath", reason=f"skill:{call.name}")
+            self._emit("route", utt, {"kind": "fastpath", "reason": route.reason, "ms": 0.0})
+            self._emit("plan", utt, {"plan": Plan(snapshot.snapshot_id, (), say=call.say).to_dict(),
+                                     "source": "skill"})  # fmt: skip
+            run.kind = "fastpath"
+            self._finish(run, call.start(self, run, snapshot), t0)
+            return route
         t_route = time.monotonic()
         route = self._router.route(utt.text, snapshot)
         data: JSON = {"kind": route.kind, "reason": route.reason, "ms": route.ms}
@@ -455,11 +484,20 @@ class Brain:
 
     # ----------------------------------------------------------------- control
 
+    def _drop_pending(self, run: _Run | None = None) -> None:
+        """Forget the pending confirmation; undo what it prepared (e.g. a typed, unsent message)."""
+        pending, self._pending = self._pending, None
+        if pending is None or not pending.on_cancel or run is None:
+            return
+        snap = self._provider.snapshot()
+        with contextlib.suppress(Exception):
+            self.skill_exec(run, pending.on_cancel, snap)
+
     def _handle_control(self, run: _Run, route: Route, t0: float) -> None:
         utt, word = run.utt, route.control
         if word in ("cancel", "no"):
-            self._pending = None
-            self._emit("done", utt, self._done_data("control", 0, t0))
+            self._drop_pending(run)
+            self._emit("done", utt, {**self._done_data("control", 0, t0), "say": "Cancelled"})
         elif word == "undo":
             if self._executor.undo():
                 self._emit("done", utt, self._done_data("control", 0, t0))
@@ -494,6 +532,73 @@ class Brain:
         data = self._done_data("flow", 0, t0)
         data.update({"saved": name, "n_steps": len(steps)})
         self._emit("done", run.utt, data)
+
+    # ------------------------------------------------------------- skill host
+
+    def skill_snapshot(self) -> UISnapshot:
+        return self._provider.snapshot()
+
+    def skill_exec(
+        self, run: _Run, actions: Sequence[Action], snap: UISnapshot
+    ) -> tuple[str | None, UISnapshot]:
+        cur = snap
+        for action in actions:
+            if self._gate(run) is not None:
+                return "stopped", cur
+            result, failure = self._exec_one(run, action, cur.snapshot_id, cur)
+            if failure is not None:
+                return failure, cur
+            run.steps.append(FlowStep(action, describe(action, cur)))
+            cur = result.snapshot or self._provider.snapshot()
+        return None, cur
+
+    def skill_ask(self, run: _Run, question: str, options: Sequence[str], resume: Resume) -> Outcome:
+        self._question = _PendingQuestion(question, tuple(options), resume)
+        self._emit("ask", run.utt, {"say": question, "options": list(options)})
+        return "pending"
+
+    def skill_send(
+        self,
+        run: _Run,
+        plan: Plan,
+        snap: UISnapshot,
+        on_cancel: Sequence[Action] = (),
+        category: str | None = None,
+    ) -> Outcome:
+        if category is not None and self._prefs is not None:
+            mode = self._prefs.mode(category)
+            label = CATEGORY_LABELS.get(category, category)
+            if mode == "block":
+                self._emit("error", run.utt, {"message": f"{label} is blocked in your settings"})
+                reason: str | None = ""
+            else:
+                reason = f"{label.lower()} asks first" if mode == "ask" else None
+        else:
+            reason = self._needs_confirm(run, plan, snap)
+        if reason == "":
+            if on_cancel:
+                self.skill_exec(run, on_cancel, self._provider.snapshot())
+            return "failed"
+        if reason is None:
+            failure, _ = self.skill_exec(run, plan.actions, snap)
+            return self.skill_fail(run, failure) if failure else "ok"
+        bundle = snap.app.bundle_id
+
+        def resume(r: _Run, fresh: UISnapshot) -> Outcome:
+            if bundle and fresh.app.bundle_id != bundle:
+                return self._refuse(r, f"frontmost app changed ({fresh.app.name})")
+            failure, _ = self.skill_exec(r, plan.actions, fresh)
+            return self.skill_fail(r, failure) if failure else "ok"
+
+        outcome = self._ask_confirm(run, plan, reason, resume)
+        if self._pending is not None:
+            self._pending.on_cancel = tuple(on_cancel)
+        return outcome
+
+    def skill_fail(self, run: _Run, message: str) -> Outcome:
+        if message != "stopped":
+            self._emit("error", run.utt, {"message": message})
+        return "failed"
 
     # ---------------------------------------------------------------- execution
 

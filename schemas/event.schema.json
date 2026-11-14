@@ -18,7 +18,8 @@
         "action",
         "done",
         "error",
-        "confirm"
+        "confirm",
+        "ask"
       ]
     },
     "utterance_id": {
