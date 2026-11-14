@@ -84,7 +84,7 @@ def real_brain_factory(planner: Planner | None) -> BrainFactory:
 
 
 @dataclass
-class _Recorder:
+class Recorder:
     """Executor wrapper that records each action with the snapshot it ran against."""
 
     inner: FakeExecutor
@@ -100,7 +100,7 @@ class _Recorder:
         return self.inner.undo()
 
 
-class _TimedSink:
+class TimedSink:
     def __init__(self) -> None:
         self.events: list[tuple[float, Event]] = []
 
@@ -148,7 +148,7 @@ class Turn:
         return f"{self.text!r}: " + " ".join(parts)
 
 
-def _turn(brain: BrainLike, sink: _TimedSink, rec: _Recorder, uid: str, text: str, verified: bool) -> Turn:
+def take_turn(brain: BrainLike, sink: TimedSink, rec: Recorder, uid: str, text: str, verified: bool) -> Turn:
     n_ev, n_steps = len(sink.events), len(rec.steps)
     speaker = Speaker(verified=verified, score=0.8 if verified else 0.05)
     t0 = time.perf_counter()
@@ -279,12 +279,14 @@ def state_problems(
 # ---------------------------------------------------------------------------
 
 
-def _skip(case: Case, route: Route, has_planner: bool) -> str | None:
+def _skip(case: Case, main: Turn, has_planner: bool) -> str | None:
     if has_planner:
         return None
     if case.needs_model:
         return "needs the planner (no model)"
-    if route.kind == "none" and case.model_route_ok:
+    # the router fell through to the planner, or a fast-path open_app left a `rest` only the planner can do
+    model_needed = main.route.kind == "none" or any("no planner" in m for m in main.errors())
+    if model_needed and case.model_route_ok:
         return "needs the planner (no model)"
     return None
 
@@ -307,7 +309,7 @@ def _outcome(case: Case, main: Turn, yes: Turn | None, problems: list[str], has_
         total_ms=sum((t.t1 - t.t0) * 1000.0 for t in turns),
         first_action_ms=main.ms_to("action"),
         error=error,
-        skipped=_skip(case, route, has_planner),
+        skipped=_skip(case, main, has_planner),
         problems=tuple(problems),
         debug=tuple(t.describe() for t in turns)
         + tuple(
@@ -326,16 +328,16 @@ def run_case_e2e(
     with tempfile.TemporaryDirectory(prefix="siriously-eval-") as td:
         try:
             provider = FixtureUIProvider(case.fixture, cfg.fixtures_dir, state=case.state)
-            rec, sink = _Recorder(FakeExecutor(provider)), _TimedSink()
+            rec, sink = Recorder(FakeExecutor(provider)), TimedSink()
             brain = factory(provider, rec, sink, Path(td) / "flows.json", case.flows)
         except Exception as exc:
             return Outcome(route=None, error=f"case setup failed: {type(exc).__name__}: {exc}")
-        before = [_turn(brain, sink, rec, f"{case.id}-b{i}", t, True) for i, t in enumerate(case.before)]
+        before = [take_turn(brain, sink, rec, f"{case.id}-b{i}", t, True) for i, t in enumerate(case.before)]
         start = (provider.snapshot().app.name, provider.snapshot().snapshot_id)
-        main = _turn(brain, sink, rec, case.id, case.utterance, case.verified)
+        main = take_turn(brain, sink, rec, case.id, case.utterance, case.verified)
         yes = None
         if case.expect.confirm and "confirm" in main.types:
-            yes = _turn(brain, sink, rec, f"{case.id}-yes", "yes", True)
+            yes = take_turn(brain, sink, rec, f"{case.id}-yes", "yes", True)
         problems = _setup_problems(before) + event_problems(case, main, yes)
         problems += state_problems(case, provider, start, cfg)
     return _outcome(case, main, yes, problems, has_planner)

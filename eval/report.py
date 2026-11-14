@@ -298,6 +298,13 @@ def headline(data: Mapping[str, object], results_path: str | None = None) -> JSO
     return out
 
 
+def fmt_ms_text(ms: float) -> str:
+    """Human latency: 0.4 ms / 412 ms / 4.2 s."""
+    if ms >= 1000:
+        return f"{ms / 1000:.1f} s"
+    return f"{ms:.0f} ms" if ms >= 10 else f"{ms:.1f} ms"
+
+
 def utf8_stdio() -> None:
     """Piped output on Windows defaults to cp1252, which mangles menu glyphs (›, …) and block digits."""
     for stream in (sys.stdout, sys.stderr):

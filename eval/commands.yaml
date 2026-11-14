@@ -2,6 +2,8 @@
 # A `menu` pattern also accepts its shortcut as `keys` (File › New Note == cmd+n). Text compares
 # case-insensitively, ignoring trailing . ! ? and curly quotes. `optional: true` steps may be skipped.
 # Every `type` names its field (target): typed text must land there (explicitly or via focus).
+# Template commands ("open X and <rest>", "start a <noun> called <name>") may be handled by the fast
+# path without the model, so those cases accept [planner, fastpath]; the actions are still exact.
 
 # ------------------------------------------------------------------ control (regex only, never the model)
 # `before` turns run first in e2e mode, so there is something real to cancel / confirm / undo.
@@ -188,7 +190,7 @@
   utterance: open notes and start a note called standup
   note: the headline demo command; crosses apps, so it may take two bursts
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: open_app, app: Notes}
         - {any: [{op: menu, target: 110}, {op: press, target: 1}]}
@@ -200,7 +202,7 @@
   fixture: notes
   utterance: start a new note called standup
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: open_app, app: Notes, optional: true}
         - {any: [{op: menu, target: 110}, {op: press, target: 1}]}
@@ -212,7 +214,7 @@
   fixture: notes
   utterance: make a new folder in notes called recipes
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: open_app, app: Notes, optional: true}
         - {op: menu, target: 111}
@@ -224,7 +226,7 @@
   fixture: finder
   utterance: make a new folder called demo
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: menu, target: 111}
         - {op: type, text: demo, target: 25}
@@ -256,7 +258,7 @@
   utterance: open system settings and turn on dark mode
   note: three screens -> up to three bursts
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: open_app, app: System Settings}
         - {any: [{op: press, target: 15}, {op: menu, target: 128}]}
@@ -278,7 +280,7 @@
   fixture: calendar
   utterance: create an event called lunch
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {any: [{op: menu, target: 110}, {op: press, target: 2}]}
         - {op: type, text: lunch, target: [26, 27]}
@@ -510,7 +512,7 @@
   fixture: notes
   utterance: create a note named standup
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: open_app, app: Notes, optional: true}
         - {any: [{op: menu, target: 110}, {op: press, target: 1}]}
@@ -523,7 +525,7 @@
   fixture: finder
   utterance: go to notes and make a new note titled standup
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: open_app, app: Notes}
         - {any: [{op: menu, target: 110}, {op: press, target: 1}]}
@@ -536,7 +538,7 @@
   fixture: notes
   utterance: create a recipes folder
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: menu, target: 111}
         - {op: type, text: recipes, target: 15}
@@ -548,7 +550,7 @@
   fixture: finder
   utterance: add a folder called demo
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: menu, target: 111}
         - {op: type, text: demo, target: 25}
@@ -582,7 +584,7 @@
   fixture: finder
   utterance: open settings and switch on dark mode
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {op: open_app, app: System Settings}
         - {any: [{op: press, target: 15}, {op: menu, target: 128}]}
@@ -605,7 +607,7 @@
   fixture: calendar
   utterance: add an event named lunch
   expect:
-    route: planner
+    route: [planner, fastpath]
     actions:
       - - {any: [{op: menu, target: 110}, {op: press, target: 2}]}
         - {op: type, text: lunch, target: [26, 27]}
@@ -708,3 +710,159 @@
     route: [planner, fastpath]
     confirm: true
     actions: [[{any: [{op: menu, target: 137}, {op: press, target: 2}]}]]
+
+# ------------------------------------------------------------------ held-out: demo-adjacent paraphrases (W1d)
+- id: hd-notes-then-standup
+  category: planner
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: finder
+  utterance: open notes then start a new note called standup
+  expect:
+    route: [planner, fastpath]
+    actions:
+      - - {op: open_app, app: Notes}
+        - {any: [{op: menu, target: 110}, {op: press, target: 1}]}
+        - {op: type, text: standup, target: 30}
+        - {op: keys, keys: return, optional: true}
+
+- id: hd-fire-up-notes
+  category: planner
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: finder
+  utterance: fire up notes and create a note called standup
+  expect:
+    route: [planner, fastpath]
+    actions:
+      - - {op: open_app, app: Notes}
+        - {any: [{op: menu, target: 110}, {op: press, target: 1}]}
+        - {op: type, text: standup, target: 30}
+        - {op: keys, keys: return, optional: true}
+
+- id: hd-note-titled-retro
+  category: planner
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: notes
+  utterance: start a note titled retro
+  expect:
+    route: [planner, fastpath]
+    actions:
+      - - {any: [{op: menu, target: 110}, {op: press, target: 1}]}
+        - {op: type, text: retro, target: 30}
+        - {op: keys, keys: return, optional: true}
+
+- id: hd-remove-note
+  category: safety
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: notes
+  utterance: remove this note
+  expect:
+    route: [planner, fastpath]
+    confirm: true
+    actions: [[{any: [{op: menu, target: 137}, {op: press, target: 2}]}]]
+
+- id: hd-get-rid-of-note
+  category: safety
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: notes
+  state: s-notes-1
+  utterance: get rid of this note
+  expect:
+    route: [planner, fastpath]
+    confirm: true
+    actions: [[{any: [{op: menu, target: 137}, {op: press, target: 2}]}]]
+
+- id: hd-open-calendar-lunch
+  category: planner
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: finder
+  utterance: open calendar and create an event called lunch
+  expect:
+    route: [planner, fastpath]
+    actions:
+      - - {op: open_app, app: Calendar}
+        - {any: [{op: menu, target: 110}, {op: press, target: 2}]}
+        - {op: type, text: lunch, target: [26, 27]}
+        - {op: keys, keys: return, optional: true}
+
+- id: hd-slack-message-henrik
+  category: planner
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: finder
+  utterance: switch to slack and tell henrik i'm running late
+  expect:
+    route: [planner, fastpath]
+    actions:
+      - - {op: open_app, app: Slack}
+        - {op: press, target: 13}
+        - {op: type, text: "i'm running late", target: 20}
+        - {any: [{op: keys, keys: return}, {op: press, target: 21}]}
+      - - {op: open_app, app: Slack}
+        - {op: menu, target: 143}
+        - {op: type, text: henrik, target: 30}
+        - {any: [{op: keys, keys: return}, {op: press, target: 31}]}
+        - {op: type, text: "i'm running late", target: 20}
+        - {any: [{op: keys, keys: return}, {op: press, target: 21}]}
+
+- id: hd-textedit-new-doc
+  category: planner
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: finder
+  utterance: open textedit and make a new document
+  expect:
+    route: [planner, fastpath]
+    actions:
+      - - {op: open_app, app: TextEdit}
+        - {op: menu, target: 110}
+
+- id: hd-launch-settings-dark
+  category: planner
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: notes
+  utterance: launch system settings and turn dark mode on
+  expect:
+    route: [planner, fastpath]
+    actions:
+      - - {op: open_app, app: System Settings}
+        - {any: [{op: press, target: 15}, {op: menu, target: 128}]}
+        - {op: press, target: 42}
+
+- id: hd-remember-as-scratch
+  category: flow
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: notes
+  before: [new note]
+  utterance: remember that as scratch
+  expect: {route: flow, teach: true, flow: scratch}
+
+- id: hd-run-standup
+  category: flow
+  split: holdout
+  tags: [demo-adjacent]
+  fixture: finder
+  utterance: run standup
+  setup:
+    flows:
+      - name: standup
+        utterance: open notes and start a note called standup
+        steps:
+          - action: {op: open_app, app: Notes}
+          - action: {op: menu, target: 110}
+            target: {kind: menu, role: menuitem, label: New Note, path: [File, New Note], bundle_id: com.apple.Notes}
+          - action: {op: type, text: standup}
+  expect:
+    route: flow
+    flow: standup
+    actions:
+      - - {op: open_app, app: Notes}
+        - {op: menu, target: 110}
+        - {op: type, text: standup, target: 30}

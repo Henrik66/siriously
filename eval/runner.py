@@ -5,6 +5,9 @@ it decided (a plan, or a taught flow resolved step by step). For planner routes,
 the screen and the expected sequence is not finished yet, the planner is called again on the new
 snapshot (up to ``max_bursts`` bursts) — the eval stands in for the pipeline's "is the goal done?"
 check, so it measures whether the planner can carry a task across screens. ``Outcome.bursts`` reports it.
+
+A route may carry ``rest`` ("open notes and <rest>" -> fast-path ``open_app`` + rest): like the pipeline,
+the eval routes the rest again on the new screen and executes that too (``MAX_REST_HOPS``).
 """
 
 from __future__ import annotations
@@ -156,6 +159,45 @@ def _continue(
     return bursts, ms
 
 
+MAX_REST_HOPS = 3
+
+
+def _execute(
+    case: Case, route: Route, sess: _Session, comps: Components, cfg: RunConfig
+) -> tuple[int, float]:
+    """Run whatever ``route`` decided. Returns (bursts, extra planner ms)."""
+    if route.plan is not None:
+        changed = sess.run_plan(route.plan, comps)
+        if route.kind == "planner":
+            return _continue(case, sess, comps, cfg, changed)
+        return 1, 0.0
+    if route.kind == "flow" and not route.teach:
+        _replay_flow(case, route, sess, comps)
+    return 0, 0.0
+
+
+def _follow_rest(
+    case: Case, route: Route, router: RouterLike, sess: _Session, comps: Components, cfg: RunConfig
+) -> tuple[int, float, str | None]:
+    """Route each ``rest`` on the screen the previous step produced. Returns (bursts, ms, skip reason)."""
+    bursts, ms = 0, 0.0
+    rest = getattr(route, "rest", None)
+    for _ in range(MAX_REST_HOPS):
+        if not isinstance(rest, str) or not rest or sess.failed:
+            break
+        t0 = time.perf_counter()
+        nxt = router.route(rest, sess.provider.snapshot())
+        ms += (time.perf_counter() - t0) * 1000.0
+        sess.debug.append(f"rest {rest!r} -> {nxt.kind} {nxt.reason}".rstrip())
+        skip = _skip_reason(case, nxt, comps)
+        if skip is not None:
+            return bursts, ms, skip
+        b, extra = _execute(case, nxt, sess, comps, cfg)
+        bursts, ms = bursts + b, ms + extra
+        rest = getattr(nxt, "rest", None)
+    return bursts, ms, None
+
+
 def _skip_reason(case: Case, route: Route, comps: Components) -> str | None:
     if route.kind == "none" and comps.planner is None and case.model_route_ok:
         return "needs the planner (no model)"
@@ -183,13 +225,10 @@ def run_case(case: Case, comps: Components, cfg: RunConfig | None = None) -> Out
     error = route.reason if route.kind == "none" and route.reason.startswith("planner error") else None
     bursts, extra_ms = 0, 0.0
     try:
-        if route.plan is not None and not skipped:
-            changed = sess.run_plan(route.plan, comps)
-            bursts = 1
-            if route.kind == "planner":
-                bursts, extra_ms = _continue(case, sess, comps, cfg, changed)
-        elif route.kind == "flow" and not route.teach:
-            _replay_flow(case, route, sess, comps)
+        if not skipped:
+            bursts, extra_ms = _execute(case, route, sess, comps, cfg)
+            more, rest_ms, skipped = _follow_rest(case, route, router, sess, comps, cfg)
+            bursts, extra_ms = bursts + more, extra_ms + rest_ms
     except Exception as exc:
         error = f"{type(exc).__name__} during execution: {exc}"
     return Outcome(

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -23,7 +25,7 @@ from eval.cases import (
     parse_step,
     select_cases,
 )
-from eval.demo_board import big, fmt_ms, render_board
+from eval.demo_board import big, render_board
 from eval.e2e import BrainFactory, run_case_e2e
 from eval.report import (
     comparison_text,
@@ -34,6 +36,7 @@ from eval.report import (
     summarize,
     summary_text,
 )
+from eval.report import fmt_ms_text as fmt_ms
 from eval.runner import CaseResult, Components, RouterLike, RunConfig, run_case, run_cases
 from eval.scoring import (
     Outcome,
@@ -876,3 +879,162 @@ def test_cli_json_summary_is_one_stdout_line(capsys: pytest.CaptureFixture[str])
     summary = json.loads(lines[0])
     assert summary["modes"]["router"]["pass"] == 2 and "results" not in summary
     assert "PASS  ct-stop" in captured.err  # human output moved to stderr
+
+
+# ---------------------------------------------------------------------------
+# W1d: demo rehearsal
+# ---------------------------------------------------------------------------
+
+
+class DeletePlanner:
+    """Stub planner: only knows how to delete the current note (Edit > Delete); nothing else."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def plan(
+        self, text: str, snapshot: UISnapshot, *, hint: str | None = None, error: str | None = None
+    ) -> Plan:
+        self.calls.append(text)
+        item = next((i for i in snapshot.menus if i.path == ("Edit", "Delete")), None)
+        if "delete" in text.lower() and item is not None:
+            return Plan(snapshot_id=snapshot.snapshot_id, actions=(Action.menu(item.id),), say="Delete note")
+        return Plan(snapshot_id=snapshot.snapshot_id, actions=())
+
+
+def test_rehearsal_full_demo_with_stub_planner() -> None:
+    from eval.rehearse import FixtureStage, exit_code, rehearse, results_json, timeline
+
+    stage = FixtureStage(DeletePlanner())
+    try:
+        results = rehearse(stage)
+    finally:
+        stage.close()
+    assert [r.status for r in results] == ["PASS"] * 7, [(r.step.key, r.problems) for r in results]
+    assert exit_code(results) == 0
+    text = timeline(results, "fixtures", "stub")
+    assert "READY: 7 pass, 0 fail, 0 skip" in text and "[other voice]" in text
+    data = results_json(results)
+    assert data["steps"][1]["events"] == ["rejected"] and data["steps"][5]["events"][-1] == "confirm"
+
+
+def test_rehearsal_without_model_skips_model_steps() -> None:
+    from eval.rehearse import FixtureStage, exit_code, rehearse
+
+    stage = FixtureStage(None)
+    try:
+        results = rehearse(stage, has_planner=False)
+    finally:
+        stage.close()
+    by_key = {r.step.key: r.status for r in results}
+    assert by_key["danger"] == "SKIP" and by_key["confirm"] == "SKIP" and by_key["replay"] == "PASS"
+    assert exit_code(results) == 2
+
+
+def test_rehearsal_check_failures() -> None:
+    from eval.rehearse import DEMO, Heard, check
+
+    hijack = next(s for s in DEMO if s.key == "hijack")
+    leaked = Heard("rejected", "", (("rejected", {}), ("action", {"ok": True})), 1.0, 2.0)
+    problems = check(hijack, leaked, None)
+    assert any("only 'rejected'" in p for p in problems) and any("none should" in p for p in problems)
+    teach = next(s for s in DEMO if s.key == "teach")
+    wrong = Heard("flow", "", (("heard", {}), ("route", {}), ("done", {"saved": "other"})), None, 1.0)
+    assert any("not saved" in p for p in check(teach, wrong, None))
+    task = next(s for s in DEMO if s.key == "task")
+    stuck = Heard("planner", "", (("heard", {}), ("route", {}), ("error", {"message": "boom"})), None, 1.0)
+    problems = check(task, stuck, ("Finder", "s-finder-0"))
+    assert any("ended with error" in p for p in problems) and any(
+        "frontmost app Finder" in p for p in problems
+    )
+
+
+class _FakeServer:
+    """Minimal stand-in for brain.server on loopback: /health, /utterance?wait=true, /events/history."""
+
+    def __init__(self) -> None:
+        import http.server
+
+        self.tokens: list[str | None] = []
+        self.events: list[JSON] = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                return None
+
+            def _send(self, body: JSON) -> None:
+                raw = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self) -> None:
+                outer.tokens.append(self.headers.get("X-Siriously-Token"))
+                if self.path.startswith("/health"):
+                    self._send({"ok": True, "bonsai": False})
+                else:
+                    self._send({"count": len(outer.events), "events": outer.events})
+
+            def do_POST(self) -> None:
+                outer.tokens.append(self.headers.get("X-Siriously-Token"))
+                utt = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                uid = utt["id"]
+                if not utt["speaker"]["verified"]:
+                    outer.events.append(
+                        {"type": "rejected", "utterance_id": uid, "data": {}, "ms_since_speech_end": 3}
+                    )
+                    self._send({"kind": "rejected", "reason": "unverified speaker"})
+                    return
+                for etype, ms in (("heard", 1), ("route", 2), ("plan", 3), ("action", 40), ("done", 45)):
+                    data: JSON = {"ok": True} if etype == "action" else {}
+                    outer.events.append(
+                        {"type": etype, "utterance_id": uid, "data": data, "ms_since_speech_end": ms}
+                    )
+                self._send({"kind": "fastpath", "reason": ""})
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_rehearsal_live_against_fake_server(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from eval import rehearse as rh
+
+    server = _FakeServer()
+    monkeypatch.setenv("SIRIOUSLY_TOKEN", "s3cret")
+    try:
+        code = rh.main(["--live", "--url", server.url, "--only", "hijack", "--only", "away", "--json"])
+    finally:
+        server.close()
+    data = json.loads(capsys.readouterr().out)
+    assert code == 0, data
+    hijack, away = data["steps"]
+    assert hijack["events"] == ["rejected"] and away["first_ms"] == 40.0
+    assert server.tokens and set(server.tokens) == {"s3cret"}
+
+
+def test_rehearsal_live_unreachable(capsys: pytest.CaptureFixture[str]) -> None:
+    from eval import rehearse as rh
+
+    with socket.socket() as s:  # grab a free port, then close it so nothing listens there
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    assert rh.main(["--live", "--url", f"http://127.0.0.1:{port}", "--timeout", "2"]) == 1
+    assert "cannot reach the brain server" in capsys.readouterr().err
+
+
+def test_rehearsal_cli_no_model(capsys: pytest.CaptureFixture[str]) -> None:
+    from eval import rehearse as rh
+
+    assert rh.main(["--no-model"]) == 2
+    assert "NOT READY: 5 pass, 0 fail, 2 skip" in capsys.readouterr().out

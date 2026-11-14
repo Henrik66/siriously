@@ -279,6 +279,8 @@
     {"from": "s-notes-3", "action": {"op": "press", "target": 1}, "to": "s-notes-1"},
     {"from": "s-notes-1", "action": {"op": "menu", "target": 110}, "to": "s-notes-1"},
     {"from": "s-notes-1", "action": {"op": "press", "target": 1}, "to": "s-notes-1"},
+    {"from": "s-notes-1", "action": {"op": "menu", "target": 137}, "to": "s-notes-0"},
+    {"from": "s-notes-1", "action": {"op": "press", "target": 2}, "to": "s-notes-0"},
     {"from": "s-notes-2", "action": {"op": "keys", "keys": "return"}, "to": "s-notes-0"},
     {"from": "s-notes-2", "action": {"op": "keys", "keys": "escape"}, "to": "s-notes-0"}
   ]

@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from brain.contracts import JSON
+from eval.report import fmt_ms_text as fmt_ms
 from eval.report import headline, utf8_stdio
 
 DEFAULT_RESULTS = Path(__file__).resolve().parent / "results"
@@ -50,12 +51,6 @@ def big(text: str, *, ascii_only: bool = False) -> list[str]:
         for i in range(5):
             rows[i] += glyph[i].replace("#", block).replace(" ", "  ") + "  "
     return [r.rstrip() for r in rows]
-
-
-def fmt_ms(ms: float) -> str:
-    if ms >= 1000:
-        return f"{ms / 1000:.1f} s"
-    return f"{ms:.0f} ms" if ms >= 10 else f"{ms:.1f} ms"
 
 
 def _pct(rate: object) -> str:
