@@ -24,6 +24,9 @@ Log started 2026-11-13. Updated after every phase.
 | start_all.sh | 🟢 | starts Bonsai + Argmax, both health checks pass, stop works |
 | UI provider (`mac/ui_provider.py`) | 🟢 | AX snapshots in 47–68 ms; Electron (Slack) supported; fixtures captured to `eval/fixtures/` |
 | Executor (`mac/executor.py`) | 🟢 | self-test 18/18 (Calculator + TextEdit): press, menu, type (Unicode), keys, scroll, open_app, undo, terminal / wrong-app guard |
+| Speech daemon (`mac/ear`, Swift) | 🟢 | mic → VAD → small.en + voice lock in parallel → POST /utterance. Live: delivered ~0.8 s after you stop talking (600 ms end-of-speech + ~200 ms STT/lock). Models load 0.7 s |
+| Voice lock (live, hackathon rooms) | 🟢 | 23 own / 15 impostor clips incl. room chatter; cut-off −0.49; all room chatter since recalibration rejected (−0.8 to −1.8). Re-enroll in the demo room (`siriously-ear enroll`) |
+| Voice → action (mini brain) | 🟢 | `mac/mini_brain.py` fast path: new note 4.1 s, undo/close/new tab 1.2–1.4 s, open app 0.75 s (running) to 2.8 s (launch), all from end of speech |
 | Offline verification | ⏳ | needs wifi off |
 
 ---

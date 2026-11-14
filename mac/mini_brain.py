@@ -65,7 +65,7 @@ def plan(t, snap):
         return "undo", [{"op": "keys", "keys": "cmd+z"}]
     if m := re.match(r"^(?:start |create |make )?(?:a )?new note(?: called| named| titled)?\s*(.*)$", t):
         title = m.group(1).strip()
-        acts = [{"op": "open_app", "app": "Notes"}, {"op": "keys", "keys": "cmd+n"}, {"op": "wait", "ms": 300}]
+        acts = [{"op": "open_app", "app": "Notes"}, {"op": "keys", "keys": "cmd+n"}]   # executor settles; no wait
         if title:
             acts.append({"op": "type", "text": title})
         return f"new note {title!r}", acts

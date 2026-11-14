@@ -460,9 +460,10 @@ func runDaemon(_ ear: Ear) async throws {
     try mic.start(name: opt.mic)
     log("brain: \(opt.brain)   end-of-speech silence: \(opt.silenceMs) ms   Ctrl-C to stop")
     var n = 0
+    let runTag: String = { let f = DateFormatter(); f.dateFormat = "HHmmss"; return f.string(from: Date()) }()
     for await (clip, end) in stream {
         n += 1
-        let id = String(format: "u-%04d", n)
+        let id = String(format: "u-%@-%04d", runTag, n)          // unique across restarts (saved audio)
         let t0 = Date()
         async let textTask: String = ear.transcribe(clip)
         async let embTask: [Float]? = vp == nil ? nil : ear.embed(clip)

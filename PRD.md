@@ -116,6 +116,8 @@ Teammate ships `FixtureUIProvider` (loads `eval/fixtures/*.json`) and `FakeExecu
 - **`changed`:** true when anything visible changed (elements, frames, window, focus, static text digest, focused value/selection, scroll position). `changed: false` with `ok: true` means the action was sent but nothing visibly happened, which is a re-plan signal. Never blindly re-send a `press` on a "Send"-like button.
 - **Extras:** each result also has `ms`; each snapshot has `digest` (hash of static text).
 - **Measured latency, including the settle wait and the new snapshot:** press about 280 ms, keys about 300 ms, menu about 440 ms, type about 0.65 s for a short phrase (about 8 ms per character), open_app 0.8–0.9 s.
+- **Don't add `wait` between steps.** The executor already waits for the UI to settle after every action (that is most of its latency), so `[open_app Notes, keys cmd+n, type "x"]` works as is.
+- **Speech daemon** (`mac/ear`): utterance ids look like `u-135615-0003` (run tag + counter). Delivery is ~0.8 s after the user stops talking. `mac/mini_brain.py` is a fast-path-only stand-in we use for Mac-side testing; your brain replaces it on :8765.
 - **`keys` syntax:** `cmd+shift+n`, `return`, `esc`, `tab`, `space`, `delete`, `up/down/left/right`, `home/end/pageup/pagedown`, `cmd+,`, `cmd++`, `cmd+?`, `f1..f20`; modifiers `cmd ctrl option shift fn`. `scroll.amount` = units of 3 lines (default 5). `open_app` matches fuzzily (`"settings"` → System Settings, `"chrome"` → Google Chrome).
 
 ### 4.6 Events (brain → overlay): `WS ws://127.0.0.1:8765/events`
