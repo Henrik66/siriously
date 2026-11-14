@@ -1,0 +1,72 @@
+{
+  "label": "win-4B-Q2_0-stock-vulkan",
+  "backend": "llama",
+  "base_url": "http://127.0.0.1:8081/v1",
+  "model": "bonsai",
+  "timestamp": "2026-11-14T12:34:33",
+  "chat": {
+    "ok": true,
+    "reply": "A ternary-weight language model assigns probabilities from three possible values (typically 0, 1, and 2) to tokens instead of the standard continuous range used in binary or softmax-based approaches.",
+    "seconds": 2.528,
+    "usage": {
+      "completion_tokens": 41,
+      "prompt_tokens": 25,
+      "total_tokens": 66,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    }
+  },
+  "json": {
+    "ok": true,
+    "mode": "json_schema",
+    "constrained": true,
+    "seconds": 6.111,
+    "raw": "{\n  \"name\": \"Maria Chen\",\n  \"city\": \"Ithaca\",\n  \"phone\": \"607-555-0142\",\n  \"topic\": \"robotics demo\",\n  \"day\": \"Saturday\",\n  \"attendees\": 4\n}",
+    "schema_errors": [],
+    "content_errors": []
+  },
+  "speed": {
+    "ok": true,
+    "warmup": {
+      "ttft_s": 0.4465,
+      "total_s": 9.9074,
+      "completion_tokens": 128,
+      "client_decode_tps": 13.42,
+      "server_decode_tps": 13.42,
+      "server_prompt_tps": 75.07
+    },
+    "runs": [
+      {
+        "ttft_s": 0.4338,
+        "total_s": 11.5178,
+        "completion_tokens": 128,
+        "client_decode_tps": 11.46,
+        "server_decode_tps": 11.46,
+        "server_prompt_tps": 72.63
+      },
+      {
+        "ttft_s": 0.3509,
+        "total_s": 10.6832,
+        "completion_tokens": 128,
+        "client_decode_tps": 12.29,
+        "server_decode_tps": 12.29,
+        "server_prompt_tps": 87.33
+      },
+      {
+        "ttft_s": 0.3861,
+        "total_s": 12.1055,
+        "completion_tokens": 128,
+        "client_decode_tps": 10.84,
+        "server_decode_tps": 10.84,
+        "server_prompt_tps": 74.45
+      }
+    ],
+    "summary": {
+      "ttft_ms_median": 386.0,
+      "client_decode_tps_median": 11.46,
+      "server_decode_tps_median": 11.46,
+      "server_prompt_tps_median": 74.45
+    }
+  }
+}

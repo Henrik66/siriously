@@ -4,7 +4,7 @@
 # ///
 """Planner (PRD §5.3): Bonsai 2 4B turns an utterance + UI snapshot into a short action plan.
 
-    python3 mac/planner.py "make a new folder called receipts" eval/fixtures/finder.json   # dry run on a fixture
+    python3 mac/planner.py "make a new folder called receipts" eval/fixtures/mac/finder.json   # dry run on a captured snapshot
     from planner import plan                                                               # used by mini_brain
 
 Design (all from the PRD):

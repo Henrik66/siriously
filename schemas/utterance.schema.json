@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Utterance",
+  "type": "object",
+  "required": [
+    "id",
+    "text",
+    "speaker"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "text": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "t_speech_end": {
+      "type": "number"
+    },
+    "stt_ms": {
+      "type": "integer"
+    },
+    "speaker": {
+      "type": "object",
+      "required": [
+        "verified"
+      ],
+      "properties": {
+        "verified": {
+          "type": "boolean"
+        },
+        "score": {
+          "type": "number"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "label": "win-4B-Q2_0-stock-cpu8",
+  "backend": "llama",
+  "base_url": "http://127.0.0.1:8082/v1",
+  "model": "bonsai",
+  "timestamp": "2026-11-14T12:36:45",
+  "chat": {
+    "ok": true,
+    "reply": "A ternary-weight language model is a variant of a neural network architecture that utilizes three distinct output classes (typically representing \"go,\" \"stay,\" or \"turn\") instead of the standard binary classification found in many simpler models, thereby enabling more complex decision-making processes such as navigation or path planning.",
+    "seconds": 3.962,
+    "usage": {
+      "completion_tokens": 60,
+      "prompt_tokens": 25,
+      "total_tokens": 85,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    }
+  },
+  "json": {
+    "ok": true,
+    "mode": "json_schema",
+    "constrained": true,
+    "seconds": 6.392,
+    "raw": "{\n  \"name\": \"Maria Chen\",\n  \"city\": \"Ithaca\",\n  \"phone\": \"607-555-0142\",\n  \"topic\": \"robotics demo\",\n  \"day\": \"Saturday\",\n  \"attendees\": 4\n}",
+    "schema_errors": [],
+    "content_errors": []
+  },
+  "speed": {
+    "ok": true,
+    "warmup": {
+      "ttft_s": 0.9812,
+      "total_s": 7.4485,
+      "completion_tokens": 128,
+      "client_decode_tps": 19.64,
+      "server_decode_tps": 19.63,
+      "server_prompt_tps": 28.03
+    },
+    "runs": [
+      {
+        "ttft_s": 0.8908,
+        "total_s": 7.1915,
+        "completion_tokens": 128,
+        "client_decode_tps": 20.16,
+        "server_decode_tps": 20.16,
+        "server_prompt_tps": 31.53
+      },
+      {
+        "ttft_s": 0.8981,
+        "total_s": 7.1942,
+        "completion_tokens": 128,
+        "client_decode_tps": 20.17,
+        "server_decode_tps": 20.17,
+        "server_prompt_tps": 30.93
+      },
+      {
+        "ttft_s": 1.039,
+        "total_s": 7.7652,
+        "completion_tokens": 128,
+        "client_decode_tps": 18.88,
+        "server_decode_tps": 18.88,
+        "server_prompt_tps": 26.05
+      }
+    ],
+    "summary": {
+      "ttft_ms_median": 898.0,
+      "client_decode_tps_median": 20.16,
+      "server_decode_tps_median": 20.16,
+      "server_prompt_tps_median": 30.93
+    }
+  }
+}

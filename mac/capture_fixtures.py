@@ -6,7 +6,8 @@
 
     uv run --script mac/capture_fixtures.py                    # Finder, Notes, System Settings, Calendar, Slack
     uv run --script mac/capture_fixtures.py Notes Slack        # just these
-Writes eval/fixtures/<slug>.json plus eval/fixtures/apps.json (list_apps()). Brings each app to the front.
+Writes eval/fixtures/mac/<slug>.json plus eval/fixtures/mac/apps.json (list_apps()): raw single snapshots. The
+brain's eval uses multi-state fixtures in eval/fixtures/*.json (docs/MAC_INTEGRATION.md §8). Brings each app to the front.
 NOTE: snapshots contain whatever is on screen (file names, note titles, messages). Review before sharing.
 """
 import json
@@ -20,7 +21,7 @@ import AppKit  # noqa: E402
 from ui_provider import MacUIProvider  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "eval", "fixtures")
+OUT = os.path.join(ROOT, "eval", "fixtures", "mac")
 APPS = sys.argv[1:] or ["Finder", "Notes", "System Settings", "Calendar", "Slack"]
 SETTLE = {"Slack": 3.0}
 

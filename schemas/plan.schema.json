@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Plan",
+  "type": "object",
+  "required": [
+    "snapshot_id",
+    "actions"
+  ],
+  "properties": {
+    "snapshot_id": {
+      "type": "string"
+    },
+    "confirm": {
+      "type": "boolean"
+    },
+    "say": {
+      "type": "string"
+    },
+    "actions": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "required": [
+          "op"
+        ],
+        "properties": {
+          "op": {
+            "enum": [
+              "open_app",
+              "press",
+              "menu",
+              "type",
+              "keys",
+              "scroll",
+              "wait"
+            ]
+          },
+          "target": {
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          },
+          "keys": {
+            "type": "string"
+          },
+          "app": {
+            "type": "string"
+          },
+          "direction": {
+            "enum": [
+              "up",
+              "down"
+            ]
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "ms": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "ask": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      }
+    },
+    "mode": {
+      "enum": [
+        "actions",
+        "dictation"
+      ]
+    }
+  }
+}

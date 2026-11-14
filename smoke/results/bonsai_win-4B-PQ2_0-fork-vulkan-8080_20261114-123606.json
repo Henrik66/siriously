@@ -1,0 +1,72 @@
+{
+  "label": "win-4B-PQ2_0-fork-vulkan-8080",
+  "backend": "llama",
+  "base_url": "http://127.0.0.1:8080/v1",
+  "model": "C:\\Users\\hgrid\\local-ai-hackathon-samples\\bonsai-models\\gguf\\models\\Ternary-Bonsai-2-4B-PQ2_0.gguf",
+  "timestamp": "2026-11-14T12:35:33",
+  "chat": {
+    "ok": true,
+    "reply": "A ternary-weight language model assigns probabilities from three discrete categories (such as \"positive,\" \"neutral,\" or \"negative\") rather than the continuous range of standard probabilistic outputs to each word prediction.",
+    "seconds": 4.156,
+    "usage": {
+      "completion_tokens": 41,
+      "prompt_tokens": 25,
+      "total_tokens": 66,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    }
+  },
+  "json": {
+    "ok": true,
+    "mode": "json_schema",
+    "constrained": true,
+    "seconds": 5.31,
+    "raw": "{\n  \"name\": \"Maria Chen\",\n  \"city\": \"Ithaca\",\n  \"phone\": \"607-555-0142\",\n  \"topic\": \"robotics demo\",\n  \"day\": \"Saturday\",\n  \"attendees\": 4\n}",
+    "schema_errors": [],
+    "content_errors": []
+  },
+  "speed": {
+    "ok": true,
+    "warmup": {
+      "ttft_s": 0.4168,
+      "total_s": 7.491,
+      "completion_tokens": 128,
+      "client_decode_tps": 17.95,
+      "server_decode_tps": 17.8,
+      "server_prompt_tps": 106.43
+    },
+    "runs": [
+      {
+        "ttft_s": 0.3373,
+        "total_s": 5.5272,
+        "completion_tokens": 128,
+        "client_decode_tps": 24.47,
+        "server_decode_tps": 24.47,
+        "server_prompt_tps": 102.75
+      },
+      {
+        "ttft_s": 0.2986,
+        "total_s": 5.7544,
+        "completion_tokens": 128,
+        "client_decode_tps": 23.28,
+        "server_decode_tps": 23.28,
+        "server_prompt_tps": 110.36
+      },
+      {
+        "ttft_s": 0.308,
+        "total_s": 5.5966,
+        "completion_tokens": 128,
+        "client_decode_tps": 24.01,
+        "server_decode_tps": 24.01,
+        "server_prompt_tps": 106.45
+      }
+    ],
+    "summary": {
+      "ttft_ms_median": 308.0,
+      "client_decode_tps_median": 24.01,
+      "server_decode_tps_median": 24.01,
+      "server_prompt_tps_median": 106.45
+    }
+  }
+}
