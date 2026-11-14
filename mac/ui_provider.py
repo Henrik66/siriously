@@ -170,26 +170,37 @@ class MacUIProvider:
         return AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
 
     @staticmethod
+    def _bundle_id(name: str) -> str | None:
+        path = AppKit.NSWorkspace.sharedWorkspace().fullPathForApplication_(name)
+        b = AppKit.NSBundle.bundleWithPath_(path) if path else None
+        return b.bundleIdentifier() if b is not None else None
+
+    @staticmethod
     def activate(name: str, timeout: float = 8.0) -> bool:
         """Launch (if needed) and bring an app to the front. `open -a` alone is not enough: macOS'
         cooperative activation ignores activation requests from a background process, so we raise the
-        app through the Accessibility API (AXFrontmost), which trusted processes may do."""
+        app through the Accessibility API (AXFrontmost), which trusted processes may do.
+        The pid is looked up by bundle id: NSWorkspace.runningApplications() is a KVO snapshot that only
+        refreshes on the main run loop, so off the main thread it never shows a freshly launched app."""
         import subprocess
         subprocess.run(["open", "-a", name], check=True, capture_output=True)
+        bid = MacUIProvider._bundle_id(name)
         t0 = time.time()
         while time.time() - t0 < timeout:
-            # Pump the run loop so NSWorkspace's process list is fresh in a CLI process.
-            AppKit.NSRunLoop.currentRunLoop().runUntilDate_(AppKit.NSDate.dateWithTimeIntervalSinceNow_(0.05))
-            match = [a for a in AppKit.NSWorkspace.sharedWorkspace().runningApplications()
-                     if a.localizedName() == name]
-            if match:
-                pid = match[0].processIdentifier()
+            if bid:
+                apps = list(AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bid))
+            else:
+                AppKit.NSRunLoop.currentRunLoop().runUntilDate_(AppKit.NSDate.dateWithTimeIntervalSinceNow_(0.05))
+                apps = [a for a in AppKit.NSWorkspace.sharedWorkspace().runningApplications()
+                        if a.localizedName() == name]
+            if apps:
+                pid = apps[0].processIdentifier()
                 AX.AXUIElementSetAttributeValue(AX.AXUIElementCreateApplication(pid), "AXFrontmost", True)
                 time.sleep(0.15)
                 front = MacUIProvider.frontmost_app()
                 if front is not None and front.processIdentifier() == pid:
                     return True
-            time.sleep(0.15)
+            time.sleep(0.1)
         return False
 
     def snapshot(self, include_menus: bool = True) -> dict:
