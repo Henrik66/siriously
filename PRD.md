@@ -71,6 +71,16 @@ If `speaker.verified` is false, the brain **does nothing** except emit a `reject
 ```
 Henrik's provider already filters to **visible, actionable** items. The brain does the relevance ranking (§5.3).
 
+**Implemented: `mac/ui_provider.py`** (`MacUIProvider.snapshot()`, `list_apps()`, `activate(name)`, `element_ref(snapshot_id, id)`). What real snapshots look like, so the contracts must accept them:
+- One id counter per snapshot: elements first (1..N), then menu items (N+1..).
+- Elements carry `frame: [x, y, w, h]` (screen points, for the overlay ring), and `value` for text inputs.
+- `role` is the lowercase AX role or subrole: `button, menubutton, popupbutton, checkbox, radiobutton, tab, row, cell, textfield, textarea, searchfield, link, switch, statictext…`. Window chrome appears as `button "Close window" / "Minimize window" / "Full screen"`.
+- Menu items have `label: "File › New Note"`, `path`, `shortcut` (e.g. `cmd+n`, `shift+cmd+delete`, `cmd+up`; null if none) and `enabled`. The Services submenu is excluded.
+- Extra top-level fields: `ts`, `stats {ms, visited, elements, menus}`. `focused_id` may be null.
+- Measured: **47–68 ms per snapshot**. Finder 32 elements / 201 menu items, Notes 34/205, System Settings 28/113, Calendar 22/116, Slack 110/142 (Electron tree enabled automatically).
+- Real fixtures (`eval/fixtures/*.json`) contain Henrik's on-screen content, so they are shared privately, not in this public repo.
+- On the Mac, the brain needs `pyobjc-framework-ApplicationServices` and `pyobjc-framework-Cocoa`. Add them with a `; sys_platform == 'darwin'` marker so Windows/Linux installs still work.
+
 ### 4.3 Plan (brain → executor)
 ```json
 {"snapshot_id": "s-0192", "confirm": false, "say": "New note: standup",

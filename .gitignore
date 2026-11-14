@@ -31,3 +31,6 @@ __pycache__/
 # Personal voice data (real mic recordings, voiceprints): never publish
 smoke/clips/real/
 smoke/results/voice_session_*.json
+
+# Real UI snapshots contain on-screen personal content; share privately until reviewed
+eval/fixtures/*.json
