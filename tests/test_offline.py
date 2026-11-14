@@ -13,6 +13,7 @@ import importlib.util
 import ipaddress
 import pkgutil
 import socket
+import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -119,9 +120,15 @@ def _modules(pkg: object) -> list[str]:
     return [m.name for m in pkgutil.walk_packages(path, prefix=name + ".")]
 
 
+# Mac-only adapters (pyobjc / Accessibility API): importable only on macOS, where they are checked too.
+MAC_ONLY = frozenset({"brain.mac"})
+
+
 def test_every_module_imports_offline(network_attempts: list[str]) -> None:
     names = _modules(brain) + _modules(eval_pkg)
     assert "brain.pipeline" in names and "eval.run_eval" in names
+    if sys.platform != "darwin":
+        names = [n for n in names if n not in MAC_ONLY]
     for name in names:
         importlib.import_module(name)
     spec = importlib.util.spec_from_file_location("demo_rehearse", ROOT / "scripts" / "demo" / "rehearse.py")

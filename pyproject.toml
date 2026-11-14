@@ -43,7 +43,7 @@ python_files = ["test_*.py", "*_test.py"]
 [tool.ruff]
 line-length = 110
 target-version = "py311"
-extend-exclude = ["smoke", "*.md"]
+extend-exclude = ["smoke", "*.md", "mac"]  # mac/: Mac-only AX scripts (pyobjc), not the cross-platform brain
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
