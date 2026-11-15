@@ -6,6 +6,7 @@ import contextlib
 import functools
 import inspect
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -14,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol, cast
 
 from brain.addressing import CATEGORY_LABELS, FollowUp, Prefs, sounds_like_command, strip_wake, verdict
+from brain.answer import classify as classify_question
 from brain.choice import parse_choice
 from brain.config import Settings
 from brain.contracts import (
@@ -49,6 +51,12 @@ class RouterLike(Protocol):
 Outcome = Literal["ok", "failed", "pending", "stopped"]
 
 _PLAN_KINDS = ("fastpath", "planner", "dictation")
+# A command cut off mid-thought by a pause: "open Safari and look up" … "Mac voice control."
+_DANGLING = re.compile(
+    r"\b(?:look up|search for|search up|called|named|saying|that says|to|and|about)\W*$", re.IGNORECASE
+)
+DANGLING_WAIT_S = 8.0
+
 _PRESERVE_PENDING = frozenset(
     {"yes", "no", "cancel", "stop"}
 )  # every other utterance drops a pending confirm
@@ -243,6 +251,7 @@ class Brain:
         self._lock = threading.Lock()
         self._pending: _Pending | None = None
         self._ask: _PendingAsk | None = None
+        self._partial: tuple[str, float] | None = None  # (dangling command, monotonic time)
         self._last: tuple[tuple[FlowStep, ...], str] | None = None
         # Wake word, follow-up window and per-category permissions (brain.addressing). None = every verified
         # utterance is a command and brain.safety alone decides confirmations (dev, eval, tests).
@@ -312,7 +321,12 @@ class Brain:
         assert self._prefs is not None
         prefs = self._prefs
         woke, body = strip_wake(utt.text, prefs.wake_rx())
-        active = self._pending is not None or self._ask is not None or self._question is not None
+        active = (
+            self._pending is not None
+            or self._ask is not None
+            or self._question is not None
+            or self._partial is not None
+        )
         busy = self._lock.locked()
         word = _control_word(body)
         short = len(body.split()) <= 4
@@ -374,6 +388,7 @@ class Brain:
             self._pending = None
             self._ask = None
             self._question = None
+            self._partial = None
 
     def _handle_stop(self, utt: Utterance, received: float) -> Route:
         """Stop must never wait for the utterance lock."""
@@ -412,7 +427,20 @@ class Brain:
             self._drop_pending()  # a new command/teach/undo invalidates any "are you sure?"
         ask, self._ask = self._ask, None  # any utterance consumes the pending question
         question, self._question = self._question, None
+        partial, self._partial = self._partial, None
+        if word is None and partial is not None and time.monotonic() - partial[1] <= DANGLING_WAIT_S:
+            utt = replace(utt, text=f"{partial[0]} {utt.text.strip()}")  # the rest of the cut-off command
         self._emit("heard", utt, {"text": utt.text, "speaker": utt.speaker.to_dict()})
+        if (
+            word is None
+            and question is None
+            and ask is None
+            and _DANGLING.search(utt.text.strip())
+            and not classify_question(utt.text)[0]  # "what's this about?"
+        ):
+            self._partial = (utt.text.strip().rstrip(".,!?"), time.monotonic())
+            self._emit("ask", utt, {"say": f"{self._partial[0]} …", "options": []})
+            return Route(kind="none", reason="waiting for the rest of the command")
         deadline = t0 + self._settings.utterance_timeout_s
         run = _Run(utt, utt.text, "control" if word else "none", deadline, gen=gen)
         if word is not None:  # control words never wait for (or fail on) a UI walk

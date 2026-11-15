@@ -24,6 +24,7 @@ def messages(sid: str, window: str = "", typed: str = "") -> UISnapshot:
             UIItem(10, "element", "row", "Hariprasad Gridharan, I cant bro, 2:31 PM"),
             UIItem(11, "element", "row", "Hari Patel, see you, Yesterday"),
             UIItem(12, "element", "row", "Omar Haddad, lol, 1:02 PM"),
+            UIItem(13, "element", "row", "Kat, CIS 142, 11:40 AM"),
             UIItem(20, "element", "textfield", "Message", value=typed),
         ),
     )
@@ -52,7 +53,7 @@ class MessagesExecutor:
         self.actions.append(action)
         self.p.n += 1
         s = self.p.snap
-        if action.op == "press" and action.target in (10, 11, 12):
+        if action.op == "press" and action.target in (10, 11, 12, 13):
             label = next(i.label for i in s.items if i.id == action.target)
             s = messages(f"m{self.p.n}", window=label.split(",")[0])
         elif action.op == "type":
@@ -155,3 +156,35 @@ def test_taken_folder_name_offers_the_next_free_one(tmp_path: Path, monkeypatch:
     assert "Make “test 2” instead" in sink.events[-1].data["plan"]["say"]
     _say(brain, "yes")
     assert Action.type_text("test 2") in x.actions
+
+
+def test_names_match_by_sound() -> None:
+    convos = skills.conversations(messages("m"))
+    assert [n for n, _ in skills.match_people("cat", convos)] == ["Kat"]
+    assert skills.respell("cat with a k hello") == "kat hello"
+    assert skills.respell("cat spelled with a k") == "kat"
+    assert skills.respell("omar with you") == "omar with you"
+
+
+def test_misheard_kat_still_texts_kat(tmp_path: Path) -> None:
+    brain, _x, sink = _rig(tmp_path)
+    _say(brain, "Text cat with a K see you")
+    assert sink.events[-1].data["plan"]["say"] == "Send “see you” to Kat"
+
+
+def test_unknown_name_asks_who_and_keeps_the_message(tmp_path: Path) -> None:
+    brain, _x, sink = _rig(tmp_path)
+    _say(brain, "text Zed running late")
+    assert sink.events[-1].type == "ask"
+    assert "Who should I text" in sink.events[-1].data["say"]
+    _say(brain, "Omar")
+    assert sink.events[-1].type == "confirm"
+    assert sink.events[-1].data["plan"]["say"] == "Send “running late” to Omar Haddad"
+
+
+def test_unknown_name_twice_gives_up(tmp_path: Path) -> None:
+    brain, x, sink = _rig(tmp_path)
+    _say(brain, "text Zed hi")
+    _say(brain, "Quentin")
+    assert sink.events[-1].type == "error"
+    assert Action.key("return") not in x.actions

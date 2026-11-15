@@ -111,16 +111,42 @@ def wake_rx(word: str) -> re.Pattern[str]:
     return re.compile(r"^\W*(?:(?:hey|hi|ok|okay|yo)\W+)?" + core + r"\b\W*", re.IGNORECASE)
 
 
+_LEAD_FILLER = re.compile(r"^\W*(?:(?:like|so|um+|uh+|and|but|ok|okay|alright|well)\W+){1,2}", re.IGNORECASE)
+_SENTENCE_END = re.compile(r"[.!?]\s+")
+WAKE_BODY_MAX_WORDS = 25  # longer than this after a mid-clip "Seriously." is conversation, not a command
+
+
+def _wake_at(seg: str, rx: re.Pattern[str]) -> int | None:
+    """End of the wake word when ``seg`` starts with it, optionally after one or two fillers ("Like, …")."""
+    if m := rx.match(seg):
+        return m.end()
+    if (lead := _LEAD_FILLER.match(seg)) and (m := rx.match(seg[lead.end() :])):
+        return lead.end() + m.end()
+    return None
+
+
+def _until_next_wake(body: str, rx: re.Pattern[str]) -> str:
+    """'open Safari. Seriously open Safari.' -> 'open Safari.' (a repeated command runs once)."""
+    for b in _SENTENCE_END.finditer(body):
+        if _wake_at(body[b.end() :], rx) is not None:
+            return body[: b.start() + 1].strip()
+    return body.strip()
+
+
 def strip_wake(text: str, rx: re.Pattern[str]) -> tuple[bool, str]:
     """(woke, text without the wake word). Accepts it at the start, or at the start of a later sentence
-    when at most 6 words come before it (Whisper glues "Right." onto "Seriously, text Omar")."""
+    (also after "like"/"so"/"um") when a command follows, since the mic often glues earlier chatter onto
+    the command: "It's a good idea. Like seriously open Safari" -> "open Safari"."""
     if m := rx.match(text):
-        return True, text[m.end() :].strip()
-    for b in re.finditer(r"[.!?]\s+", text):
-        if len(text[: b.start()].split()) > 6:
-            break
-        if m := rx.match(text[b.end() :]):
-            return True, text[b.end() + m.end() :].strip()
+        return True, _until_next_wake(text[m.end() :], rx)
+    for start in [0, *(b.end() for b in _SENTENCE_END.finditer(text))]:
+        seg = text[start:]
+        if (end := _wake_at(seg, rx)) is not None:
+            body = seg[end:]
+            body = _until_next_wake(body, rx)
+            # mid-clip, "Seriously, he never listens." is just talk: only a command counts
+            if len(body.split()) <= WAKE_BODY_MAX_WORDS and sounds_like_command(body):
+                return True, body
     return False, text
 
 

@@ -107,8 +107,20 @@ def conversations(snap: UISnapshot) -> list[tuple[str, UIItem]]:
 
 
 def _nm(x: str) -> str:
-    """Spelling-tolerant name form: 'Harry' ~ 'Hari' (collapse double letters, final y -> i)."""
-    return re.sub(r"y$", "i", re.sub(r"(.)\1", r"\1", x.lower()))
+    """Sound-alike name form, since speech-to-text spells names its own way: 'Harry' ~ 'Hari' (double
+    letters, final y -> i), 'Cat' ~ 'Kat', 'Carl' ~ 'Karl', 'Nick' ~ 'Nik' (hard c -> k), 'Phil' ~ 'Fil'."""
+    x = x.lower().replace("ph", "f").replace("ck", "k")
+    x = re.sub(r"c(?![eihy])", "k", x)  # hard c; 'Cecilia', 'Chris' keep theirs
+    return re.sub(r"y$", "i", re.sub(r"(.)\1", r"\1", x))
+
+
+_SPELLED = re.compile(r"^(\w+) (?:spelled )?with an? ([a-z])\b\s*")
+
+
+def respell(words: str) -> str:
+    """'cat with a k hello' -> 'kat hello': the user correcting the first letter of a misheard name."""
+    m = _SPELLED.match(words)
+    return f"{m[2]}{m[1][1:]} {words[m.end() :]}".strip() if m else words
 
 
 def match_people(query: str, convos: list[tuple[str, UIItem]]) -> list[tuple[str, UIItem]]:
@@ -156,6 +168,9 @@ class Texting:
             failure, snap = host.skill_exec(run, [Action.open_app("Messages")], snap)
             if failure:
                 return host.skill_fail(run, failure)
+        return self._to(host, run, snap, respell(rest), retry=True)
+
+    def _to(self, host: SkillHost, run: Any, snap: UISnapshot, rest: str, retry: bool) -> Outcome:
         convos = conversations(snap)
         words = _SAYING.sub("|", rest).split("|")[0].split()
         matches: list[tuple[str, UIItem]] = []
@@ -166,7 +181,15 @@ class Texting:
                 break
         if not matches:
             who = words[0].title() if words else "?"
-            return host.skill_fail(run, f"No recent conversation with “{who}”")
+            if not retry or not words:
+                return host.skill_fail(run, f"No recent conversation with “{who}”")
+            tail = " ".join(rest.split()[1:])  # assume a one-word name was misheard; keep the message
+
+            def named(run2: Any, answer: str) -> Outcome:
+                name = respell(re.sub(r"^(?:text|message|to)\s+", "", _norm(answer)))
+                return self._to(host, run2, host.skill_snapshot(), f"{name} {tail}".strip(), retry=False)
+
+            return host.skill_ask(run, f"No “{who}” in Messages. Who should I text?", [], named)
         msg = re.sub(r"^(?:saying|that says|that)\s+", "", " ".join(rest.split()[name_len:])).strip()
         if len(matches) > 1:
             names = [n for n, _ in matches[:4]]

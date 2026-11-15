@@ -165,3 +165,41 @@ def test_no_prefs_keeps_old_behaviour() -> None:
     rig = WakeRig(Prefs(Path("/nonexistent/settings.json")))
     rig.brain._prefs = None
     assert rig.say("open safari").kind == "fastpath"
+
+
+@pytest.mark.parametrize(
+    ("text", "body"),
+    [
+        (
+            "It understands like one two, it's a good idea. Like seriously open Safari and look up",
+            "open Safari and look up",
+        ),
+        ("Maybe the memory is too low too. Seriously open Safari. Seriously open Safari.", "open Safari."),
+        ("So, seriously, new tab.", "new tab."),
+        ("Okay so I think we're good. Um, Siriously, text Omar hello.", "text Omar hello."),
+    ],
+)
+def test_strip_wake_after_chatter(text: str, body: str) -> None:
+    assert strip_wake(text, wake_rx("siriously")) == (True, body)
+
+
+def test_strip_wake_ignores_mid_clip_talk() -> None:
+    rx = wake_rx("siriously")
+    assert strip_wake("Long day. Like seriously, the train was so late.", rx)[0] is False
+
+
+def test_cut_off_command_waits_for_the_rest(tmp_path: Path) -> None:
+    rig = WakeRig(_prefs(tmp_path))
+    seen: list[str] = []
+    route = rig.router.route
+    rig.router.route = lambda text, snap: (seen.append(text), route(text, snap))[1]  # type: ignore[method-assign]
+    r = rig.say("It's a good idea. Like seriously open Safari and look up")
+    assert r.reason == "waiting for the rest of the command"
+    assert rig.sink.events[-1].type == "ask"
+    rig.say("Mac voice control.")  # no wake word: still part of the same command
+    assert seen == ["open Safari and look up Mac voice control."]
+
+
+def test_question_ending_in_about_does_not_wait(tmp_path: Path) -> None:
+    rig = WakeRig(_prefs(tmp_path))
+    assert rig.say("Seriously, what is this article about?").reason != "waiting for the rest of the command"
