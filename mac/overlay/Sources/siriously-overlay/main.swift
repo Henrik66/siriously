@@ -946,8 +946,8 @@ struct MenuView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: store.listening ? "waveform" : "waveform.slash")
-                    .font(.system(size: 15, weight: .medium)).frame(width: 22)
+                Image(nsImage: SiriouslyMark.image(store.listening ? .listening : .paused, size: 18))
+                    .renderingMode(.template).frame(width: 22)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Siriously").font(.system(size: 13, weight: .semibold))
                     Text(store.statusLine).font(.caption).foregroundStyle(.secondary)

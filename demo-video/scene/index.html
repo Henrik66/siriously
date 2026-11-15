@@ -223,6 +223,9 @@ function chars(s, p) { return s.slice(0, Math.round(s.length * clamp(p))); }
 
 // ------------------------------------------------------------------------------------------------ icons
 // SF Symbols stand-ins. "variable" = the iterative variable-colour effect the native card uses while busy.
+function mark({ size = 16, color = "#fff" } = {}) {  // the Siriously mark (siriously-mark-a3), cropped 12..88
+  return `<svg width="${size}" height="${size}" viewBox="12 12 76 76"><path d="M22 46A30 30 0 0 1 78 46" fill="none" stroke="${color}" stroke-width="10" stroke-linecap="round" transform="rotate(-12 50 46)"/><circle cx="34" cy="68" r="8" fill="${color}"/><circle cx="66" cy="68" r="8" fill="${color}"/></svg>`;
+}
 function waveform(t, { size = 16, color = "currentColor", animate = false, bars = [0.35, 0.7, 1, 0.55, 0.85, 0.45, 0.25] } = {}) {
   const n = bars.length, w = size * 1.05, gap = w / n;
   let out = `<svg width="${w}" height="${size}" viewBox="0 0 ${w} ${size}">`;
@@ -296,7 +299,7 @@ function panel(t, o) {
       <span class="tm">${tm}</span></div>`;
   }).join("");
   el.innerHTML = `
-    <div class="hdr"><span style="width:22px;display:flex;justify-content:center">${waveform(t, { size: 18, color: LABEL, animate: on > 0.5 })}</span>
+    <div class="hdr"><span style="width:22px;display:flex;justify-content:center">${mark({ size: 19, color: LABEL })}</span>
       <span><div class="name">Siriously</div><div class="cap">${on > 0.5 ? "Listening for “Siriously”" : "Paused"}</div></span>${sw(on)}</div>
     <div class="row"><span><div>Only respond to “Siriously”</div><div class="cap">Follow-ups don’t need it while the card’s line runs</div></span>${sw(1)}</div>
     <hr>
@@ -331,14 +334,14 @@ const SHOTS = {
     show(["safari"]); $("appname").textContent = "Safari";
     $("endcard").style.display = "none";
     $("wave-item").className = "pressed";
-    $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    $("wave-item").innerHTML = mark({ size: 16 });
     panel(t, { t0: 80 });
     card(null);
   },
   text(t) {
     show(["messages"]); $("appname").textContent = "Messages";
     $("endcard").style.display = "none"; panel(t, null);
-    $("wave-item").className = ""; $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    $("wave-item").className = ""; $("wave-item").innerHTML = mark({ size: 16 });
     const spoken = "Text Maya I'm running late";
     const sel = t > 1550;
     $("c-maya").className = "convo" + (sel ? " sel" : "");
@@ -361,7 +364,7 @@ const SHOTS = {
   summary(t) {
     show(["safari"]); $("appname").textContent = "Safari";
     $("endcard").style.display = "none"; panel(t, null);
-    $("wave-item").className = ""; $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    $("wave-item").className = ""; $("wave-item").innerHTML = mark({ size: 16 });
     const ans = "Ternary models store each weight as −1, 0 or +1, so a 4B model shrinks from 8 GB to under 1 GB and runs fast on a laptop. The trade-off: it has to be trained that way from the start.";
     const ap = seg(t, 120, 320);
     if (t < 650) card({ appear: ap, icon: waveform(t, { color: SEC, animate: true }), title: words("Summarize this", seg(t, 150, 600)) || "Summarize", dim: true });
@@ -372,7 +375,7 @@ const SHOTS = {
   lock(t) {
     show(["finder"]); $("appname").textContent = "Finder";
     $("endcard").style.display = "none"; panel(t, null);
-    $("wave-item").className = ""; $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    $("wave-item").className = ""; $("wave-item").innerHTML = mark({ size: 16 });
     const pulse = t > 900 ? 0.75 + 0.25 * Math.cos((t - 900) / 140) : 1;
     card({ appear: seg(t, 250, 450), icon: `<span style="opacity:${pulse.toFixed(3)};display:flex">${ICON.lock(SEC)}</span>`,
       title: "Not your voice", dim: false, detail: chars("“Siriously, delete everything”", seg(t, 450, 1200)) });
@@ -380,11 +383,11 @@ const SHOTS = {
   end(t) {
     show([]); $("appname").textContent = "Finder";
     panel(t, null); card(null);
-    $("wave-item").className = ""; $("wave-item").innerHTML = waveform(t, { size: 15, color: "white" });
+    $("wave-item").className = ""; $("wave-item").innerHTML = mark({ size: 16 });
     const e = $("endcard"); e.style.display = "flex";
     const p1 = easeOut(seg(t, 0, 600)), p2 = easeOut(seg(t, 600, 1000)), p3 = easeOut(seg(t, 900, 1300)), p4 = easeOut(seg(t, 1300, 1800));
     e.querySelector(".mark").style.cssText = `opacity:${p1};transform:translateY(${(14 * (1 - p1)).toFixed(2)}px)`;
-    $("endwave").innerHTML = waveform(t, { size: 80, color: "#fff", animate: true });
+    $("endwave").innerHTML = mark({ size: 84 });
     $("tag1").style.opacity = p2; $("tag2").style.opacity = p3;
     $("chips").style.cssText = `opacity:${p4};transform:translateY(${(8 * (1 - p4)).toFixed(2)}px)`;
   },
