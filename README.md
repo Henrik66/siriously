@@ -39,7 +39,7 @@ Bonsai 2 4B on an AMD iGPU via Vulkan, greedy decoding. These are dev-box number
 | End of speech → first action, planner | median 1.6 s, p90 2.1 s | Bonsai 2 4B |
 | Planner call alone | median 1.94 s, p90 2.33 s | ~1234-token prompt, ~1050 cached, ~17 output tokens |
 | Demo rehearsal (`scripts/demo/rehearse.py`) | READY 7/7 | every step deterministic; passes with `--no-model` |
-| Tests | 1003 passed | ruff and mypy --strict clean |
+| Tests | 1062 passed | ruff and mypy --strict clean |
 
 The end-to-end latency in the eval runs from `Brain.handle()` entry to the first action. The Mac's speech-to-text adds to it: `base.en` took 147 ms for a 6.1 s clip on the M3.
 
@@ -97,7 +97,7 @@ uv run python -m eval.demo_board            # scoreboard from the newest results
 | `brain/mac.py` | Mac UIProvider and MacExecutor (pyobjc, Accessibility). Not in this branch yet: `--mac` exits with code 2 until it is added |
 | `eval/` | Eval harness: `commands.yaml` (77 cases, dev and holdout splits), `fixtures/` (7 app fixtures + `apps.json`), `results/`, `run_eval.py`, `demo_board.py`, `rehearse.py` |
 | `smoke/` | Bonsai and Argmax smoke tests (stdlib; work against any OpenAI-compatible server), test clips and results |
-| `tests/` | pytest suite (1003 tests) |
+| `tests/` | pytest suite (1062 tests) |
 | `pyproject.toml`, `uv.lock` | Dependencies, locked |
 
 ## Ownership

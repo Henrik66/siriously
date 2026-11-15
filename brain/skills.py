@@ -124,21 +124,26 @@ def respell(words: str) -> str:
 
 
 def match_people(query: str, convos: list[tuple[str, UIItem]]) -> list[tuple[str, UIItem]]:
+    """Conversations whose name matches every query word. Names that match by (sound-alike) prefix win;
+    loose spelling matches only count when nothing matches that way ('hari' must not also offer 'Chai')."""
     q = [_nm(x) for x in query.split()]
-    hits: list[tuple[str, UIItem]] = []
+    exact: list[tuple[str, UIItem]] = []
+    loose: list[tuple[str, UIItem]] = []
     seen: set[str] = set()
     for name, item in convos:
+        if name in seen:
+            continue
         parts = [_nm(p) for p in name.split()]
-        ok = all(
-            any(
-                p.startswith(x) or difflib.SequenceMatcher(None, x, p[: len(x) + 1]).ratio() >= 0.75
-                for p in parts
-            )
-            for x in q
-        )
-        if ok and name not in seen:
-            seen.add(name)
-            hits.append((name, item))
+        if all(any(p.startswith(x) for p in parts) for x in q):
+            exact.append((name, item))
+        elif all(
+            any(difflib.SequenceMatcher(None, x, p[: len(x) + 1]).ratio() >= 0.75 for p in parts) for x in q
+        ):
+            loose.append((name, item))
+        else:
+            continue
+        seen.add(name)
+    hits = exact or loose
     # "Hariprasad" (pinned, first name only) and "Hariprasad Gridharan" are the same person: keep the full one
     names = [n for n, _ in hits]
     return [
@@ -156,21 +161,35 @@ def _pick(answer: str, options: Sequence[str]) -> int | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def as_spoken(msg: str, spoken: str) -> str:
+    """The message as said, not normalized: 'i m running late' -> "I'm running late now!" (case, punctuation
+    and a trailing 'now' kept; Whisper's closing period dropped). Falls back to ``msg``."""
+    words = msg.split()
+    toks = list(re.finditer(r"[\w']+", spoken))
+    low = [m.group().lower() for m in toks]
+    for i in range(len(toks) - len(words), -1, -1) if words else ():
+        if low[i : i + len(words)] == words:
+            return re.sub(r"(?<!\.)\.$", "", spoken[toks[i].start() :].strip())
+    return msg
+
+
 class Texting:
     def match(self, text: str, snap: UISnapshot) -> SkillCall | None:
         rest = parse_text_command(text, snap.app.name)
         if not rest:
             return None
-        return SkillCall("text", "Text message", lambda host, run, s: self.start(host, run, s, rest))
+        return SkillCall("text", "Text message", lambda host, run, s: self.start(host, run, s, rest, text))
 
-    def start(self, host: SkillHost, run: Any, snap: UISnapshot, rest: str) -> Outcome:
+    def start(self, host: SkillHost, run: Any, snap: UISnapshot, rest: str, spoken: str = "") -> Outcome:
         if snap.app.name != "Messages":
             failure, snap = host.skill_exec(run, [Action.open_app("Messages")], snap)
             if failure:
                 return host.skill_fail(run, failure)
-        return self._to(host, run, snap, respell(rest), retry=True)
+        return self._to(host, run, snap, respell(rest), spoken, retry=True)
 
-    def _to(self, host: SkillHost, run: Any, snap: UISnapshot, rest: str, retry: bool) -> Outcome:
+    def _to(
+        self, host: SkillHost, run: Any, snap: UISnapshot, rest: str, spoken: str, retry: bool
+    ) -> Outcome:
         convos = conversations(snap)
         words = _SAYING.sub("|", rest).split("|")[0].split()
         matches: list[tuple[str, UIItem]] = []
@@ -187,10 +206,13 @@ class Texting:
 
             def named(run2: Any, answer: str) -> Outcome:
                 name = respell(re.sub(r"^(?:text|message|to)\s+", "", _norm(answer)))
-                return self._to(host, run2, host.skill_snapshot(), f"{name} {tail}".strip(), retry=False)
+                return self._to(
+                    host, run2, host.skill_snapshot(), f"{name} {tail}".strip(), spoken, retry=False
+                )
 
             return host.skill_ask(run, f"No “{who}” in Messages. Who should I text?", [], named)
         msg = re.sub(r"^(?:saying|that says|that)\s+", "", " ".join(rest.split()[name_len:])).strip()
+        msg = as_spoken(msg, spoken)
         if len(matches) > 1:
             names = [n for n, _ in matches[:4]]
 
@@ -207,11 +229,19 @@ class Texting:
         item = next((i for n, i in conversations(snap) if n == person), None)
         if item is None:
             return host.skill_fail(run, f"Can’t find the conversation with {person}")
-        failure, snap = host.skill_exec(run, [Action.press(item.id)], snap)
-        if failure:
-            return host.skill_fail(run, failure)
+
+        def is_open(s: UISnapshot) -> bool:
+            t = s.window.strip()
+            return bool(t) and (t == person or t.startswith(person + " ") or person.startswith(t + " "))
+
+        if not is_open(snap):  # the conversation may already be open: pressing its row then changes nothing
+            failure, snap = host.skill_exec(run, [Action.press(item.id)], snap)
+            if failure:
+                if failure == "stopped" or not is_open(fresh := host.skill_snapshot()):
+                    return host.skill_fail(run, failure)
+                snap = fresh
         title = snap.window.strip()
-        if not (title == person or title.startswith(person + " ") or person.startswith(title + " ")):
+        if not is_open(snap):
             return host.skill_fail(run, f"Opened “{title}”, not {person}; nothing sent")
         if not message:
 

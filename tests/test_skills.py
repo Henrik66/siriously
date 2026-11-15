@@ -25,6 +25,7 @@ def messages(sid: str, window: str = "", typed: str = "") -> UISnapshot:
             UIItem(11, "element", "row", "Hari Patel, see you, Yesterday"),
             UIItem(12, "element", "row", "Omar Haddad, lol, 1:02 PM"),
             UIItem(13, "element", "row", "Kat, CIS 142, 11:40 AM"),
+            UIItem(14, "element", "row", "Chai, Hari: lol, 10:02 AM"),
             UIItem(20, "element", "textfield", "Message", value=typed),
         ),
     )
@@ -53,7 +54,7 @@ class MessagesExecutor:
         self.actions.append(action)
         self.p.n += 1
         s = self.p.snap
-        if action.op == "press" and action.target in (10, 11, 12, 13):
+        if action.op == "press" and action.target in (10, 11, 12, 13, 14):
             label = next(i.label for i in s.items if i.id == action.target)
             s = messages(f"m{self.p.n}", window=label.split(",")[0])
         elif action.op == "type":
@@ -188,3 +189,33 @@ def test_unknown_name_twice_gives_up(tmp_path: Path) -> None:
     _say(brain, "Quentin")
     assert sink.events[-1].type == "error"
     assert Action.key("return") not in x.actions
+
+
+def test_exact_names_beat_loose_spellings() -> None:
+    convos = skills.conversations(messages("m"))
+    assert [n for n, _ in skills.match_people("hari", convos)] == ["Hariprasad Gridharan", "Hari Patel"]
+    assert [n for n, _ in skills.match_people("chai", convos)] == ["Chai"]
+    assert [n for n, _ in skills.match_people("omer", convos)] == ["Omar Haddad"]  # loose, nothing exact
+
+
+@pytest.mark.parametrize("answer", ["One.", "1", "the first one", "Hariprasad"])
+def test_numbered_answer_picks_that_option(tmp_path: Path, answer: str) -> None:
+    brain, _x, sink = _rig(tmp_path)
+    _say(brain, "text Hari I'm running late")
+    _say(brain, answer)
+    assert sink.events[-1].data["plan"]["say"] == "Send “I'm running late” to Hariprasad Gridharan"
+
+
+def test_already_open_conversation_is_not_pressed_again(tmp_path: Path) -> None:
+    brain, x, sink = _rig(tmp_path)
+    x.p.snap = messages("m0", window="Omar Haddad")
+    _say(brain, "text Omar hello")
+    assert Action.press(12) not in x.actions
+    assert sink.events[-1].data["plan"]["say"] == "Send “hello” to Omar Haddad"
+
+
+def test_message_keeps_what_was_said() -> None:
+    assert skills.as_spoken("i'm running late", "Text Hari, I'm running late.") == "I'm running late"
+    assert skills.as_spoken("on my way", "text omar on my way now!") == "on my way now!"
+    assert skills.as_spoken("what's up", "Text Kat what's up?") == "what's up?"
+    assert skills.as_spoken("hm", "something else") == "hm"

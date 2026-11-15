@@ -1053,11 +1053,7 @@ final class MenuBar: NSObject {
     }
 
     private func updateIcon() {
-        let name = !store.listening ? "waveform.slash" : (store.working ? "waveform.circle.fill" : "waveform")
-        let img = NSImage(systemSymbolName: name, accessibilityDescription: "Siriously")
-            ?? NSImage(systemSymbolName: "waveform", accessibilityDescription: "Siriously")
-        img?.isTemplate = true
-        item.button?.image = img
+        item.button?.image = SiriouslyMark.image(!store.listening ? .paused : (store.working ? .working : .listening))
     }
 
     @objc private func toggle() {
