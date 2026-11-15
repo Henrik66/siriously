@@ -4,10 +4,10 @@ export const FADE_FRAMES = 12;          // fade through black between shots (hal
 
 // Global look
 export const LOOK = {
-  blur: 16,                // tilt-shift blur strength (px) of the out-of-focus copy
+  blur: 7,                 // tilt-shift blur strength (px) of the out-of-focus copy
   bandCenter: 50,          // focus band centre, % of frame height
   bandHalf: 17,            // half-height of the fully sharp band (%) -> ~34% of the frame is sharp
-  bandSoft: 12,            // soft transition from sharp to blurred (%)
+  bandSoft: 18,            // soft transition from sharp to blurred (%)
   vignetteInner: 42,       // % of the radius that stays clear
   vignetteStrength: 0.85,  // corner darkness 0..1
   grain: 0.06,             // film grain opacity (0 = off)
