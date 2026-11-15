@@ -18,14 +18,14 @@ export const LOOK = {
 // change in scale over the shot. `liftY` nudges the whole plane up/down on screen.
 // `look` overrides LOOK for one shot (e.g. raise the focus band when the subject sits at the screen's top edge).
 export const SHOTS = [
-  { name: "menu",    ms: 3200, focus: [1640, 250], scale: 2.0,  rotX: 47, rotZ: -21, drift: [20, 260],   zoomDrift: 0.06, liftY: -40,
+  { name: "menu",    ms: 3200, focus: [1640, 250], scale: 2.0,  rotX: 24, rotZ: -10, drift: [20, 260],   zoomDrift: 0.06, liftY: -40,
     look: { bandCenter: 46 } },
-  { name: "text",    ms: 3800, focus: [1450, 300], scale: 1.75, rotX: 49, rotZ: 20,  drift: [-260, 300], zoomDrift: 0.05, liftY: -20 },
-  { name: "summary", ms: 3600, focus: [1640, 190], scale: 2.3,  rotX: 45, rotZ: -20, drift: [-170, 20],  zoomDrift: 0.07, liftY: -50,
+  { name: "text",    ms: 3800, focus: [1450, 300], scale: 1.75, rotX: 25, rotZ: 10,  drift: [-260, 300], zoomDrift: 0.05, liftY: -20 },
+  { name: "summary", ms: 3600, focus: [1640, 190], scale: 2.3,  rotX: 23, rotZ: -10, drift: [-170, 20],  zoomDrift: 0.07, liftY: -50,
     look: { bandCenter: 35, bandHalf: 15 } },
-  { name: "lock",    ms: 2600, focus: [1640, 160], scale: 2.5,  rotX: 50, rotZ: 22,  drift: [150, -10],  zoomDrift: 0.05, liftY: -50,
+  { name: "lock",    ms: 2600, focus: [1640, 160], scale: 2.5,  rotX: 25, rotZ: 11,  drift: [150, -10],  zoomDrift: 0.05, liftY: -50,
     look: { bandCenter: 35, bandHalf: 15 } },
-  { name: "end",     ms: 2600, focus: [960, 560],  scale: 1.3,  rotX: 38, rotZ: -16, drift: [-140, 0],   zoomDrift: 0.05, liftY: 0 },
+  { name: "end",     ms: 2600, focus: [960, 560],  scale: 1.3,  rotX: 20, rotZ: -8, drift: [-140, 0],   zoomDrift: 0.05, liftY: 0 },
 ];
 
 export const POSTER = { shot: "summary", ms: 2900 };   // the frame saved as poster.png
